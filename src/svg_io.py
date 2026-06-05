@@ -260,7 +260,56 @@ def _raw_xml(el) -> str:
         return ""
 
 
-def _walk(el, z_counter: list, skipped: list) -> Optional[VElem]:
+def _resolve_href(el) -> str:
+    """<use> 的引用目标 id：xlink:href 优先，回退裸 href；去掉前导 '#'。"""
+    ref = el.get("{http://www.w3.org/1999/xlink}href") or el.get("href") or ""
+    return ref.lstrip("#")
+
+
+def _collect_qpaths(el) -> list:
+    """递归从定义子树（<symbol>/<g>/<path>/形状）采集 QPainterPath 几何。
+
+    cairo 把字形定义成 <symbol><path .../></symbol>，但 symbol 可能把 path 再裹一层 <g>，故必须递归。
+    每个坏字形吞掉异常（不让一个坏 glyph 中断整份导入），跳过空 path。返回 QPainterPath 列表。
+    """
+    out: list = []
+    tag = _local_tag(el)
+    try:
+        if tag == "path":
+            d = el.get("d") or ""
+            if d:
+                qp = _path_d_to_qpath(d)
+                if qp.elementCount() > 0:
+                    out.append(qp)
+        elif tag in _SHAPE_TAGS:
+            qp = _shape_to_qpath(tag, dict(el.attrib))
+            if qp is not None and qp.elementCount() > 0:
+                out.append(qp)
+    except Exception:
+        pass  # 单个坏字形/形状不阻断整体（fail-loud 在上层按 paths 为空报数）
+    for ch in el:  # 递归子节点（symbol 常把 path 裹在 <g> 里）
+        out.extend(_collect_qpaths(ch))
+    return out
+
+
+def _inherited_fill(el) -> str:
+    """向上找祖先的 fill（cairo 把字形颜色放在包裹 <use> 的 <g fill="rgb(..)"> 上，不在 <use> 本身）。
+    取第一个非空/非 none 的 fill（内联 style 优先），归一化为 #rrggbb；找不到 → 默认黑。"""
+    node = el
+    while node is not None:
+        style = _parse_style(node.get("style"))
+        v = style.get("fill") or node.get("fill")
+        if v is not None:
+            vs = v.strip().lower()
+            if vs and vs != "none":
+                c = _norm_color(v)
+                if c is not None:
+                    return c
+        node = node.getparent()
+    return "#000000"
+
+
+def _walk(el, z_counter: list, skipped: list, id_map: Optional[dict] = None) -> Optional[VElem]:
     tag = _local_tag(el)
     if not tag or isinstance(el, etree._Comment) or isinstance(el, etree._ProcessingInstruction):
         return None
@@ -268,6 +317,11 @@ def _walk(el, z_counter: list, skipped: list) -> Optional[VElem]:
     z_counter[0] += 1
     style = _parse_style(el.get("style"))
     transform = _own_transform_tuple(el)
+
+    # 定义类节点不直接绘制（<symbol> 经 <use> 实例化；渐变/裁剪由引用处处理）→ 整体跳过，不进 skipped
+    if tag.lower() in ("defs", "symbol", "marker", "clippath", "lineargradient",
+                       "radialgradient", "pattern", "metadata", "title", "desc", "style"):
+        return None
 
     # 引用滤镜/蒙版/裁剪 → 整体只读回退（含其子树），fail-loud 报数
     if _has_unsupported_ref(el) and tag != "g":
@@ -278,7 +332,7 @@ def _walk(el, z_counter: list, skipped: list) -> Optional[VElem]:
     if tag == "g":
         children = []
         for ch in el:
-            sub = _walk(ch, z_counter, skipped)
+            sub = _walk(ch, z_counter, skipped, id_map)
             if sub is not None:
                 children.append(sub)
         # <g clip-path/mask/filter> 的子树仍可解析编辑，但裁剪/蒙版引用要原样保留
@@ -288,6 +342,35 @@ def _walk(el, z_counter: list, skipped: list) -> Optional[VElem]:
             skipped.append((el.get("id") or f"<g> #{z}") + "（裁剪/蒙版引用只读保留）")  # fail-loud 报数
         return VElem(type="group", id=el.get("id"), transform=transform, z=z,
                      opacity=_opacity(el, style), children=children, extra_attrs=extra)
+
+    if tag == "use":
+        # cairo 把每个文字字符渲染成 <use xlink:href="#glyph0-N" x=.. y=..> 引用 <defs> 里的 <symbol> 字形定义。
+        # 解析引用目标 → 采集其矢量几何 → 按 use 的 x/y 平移（字形已是渲染点尺寸，不缩放）→ 当一条矢量 path 处理。
+        ref = _resolve_href(el)
+        target = id_map.get(ref) if id_map else None
+        if target is None:  # fail-loud：引用目标找不到 → 只读回退 + 报数
+            skipped.append(el.get("id") or ("<use> #%d ->#%s 未找到" % (z, ref)))
+            return VElem(type="unsupported", id=el.get("id"), transform=transform, z=z,
+                         raw_xml=_raw_xml(el))
+        ux = _f(el.get("x"), 0.0)
+        uy = _f(el.get("y"), 0.0)
+        paths = _collect_qpaths(target)
+        if not paths:  # 目标无可绘制几何（如引用 <image>/<text>）→ 只读回退 + 报数
+            skipped.append(el.get("id") or ("<use> #%d ->#%s 无几何" % (z, ref)))
+            return VElem(type="unsupported", id=el.get("id"), transform=transform, z=z,
+                         raw_xml=_raw_xml(el))
+        qp = QtGui.QPainterPath()
+        for sub_qp in paths:
+            qp.addPath(sub_qp)
+        if ux or uy:  # SVG y-down：字形基线在 use.y，字形体在负 y，只平移不缩放
+            qp.translate(ux, uy)
+        # 字形色继承自祖先 <g fill=..>（不在 <use> 上）；解析成功的 <use> 不进 skipped
+        return VElem(
+            type="path", id=el.get("id"), transform=transform, z=z, qpath=qp,
+            fill=_inherited_fill(el), stroke=None,
+            stroke_width=_f(_attr(el, style, "stroke-width", "1"), 1.0),
+            opacity=_opacity(el, style),
+        )
 
     if tag == "text":
         # 子 <tspan> 难保真 → 取拼接文本，editable_text 仍 True（B1 单行可编辑）
@@ -380,11 +463,17 @@ def parse_svg(path: str):
         "height": root.get("height"),
         "viewBox": root.get("viewBox"),
     }
+    # id→元素映射：供 <use> 引用解析（含 <defs>/<symbol> 内的字形定义）。遍历整棵树取所有带 id 的节点。
+    id_map: dict = {}
+    for node in root.iter():
+        nid = node.get("id") if isinstance(node.tag, str) else None
+        if nid:
+            id_map.setdefault(nid, node)  # 首个定义优先（重复 id 取靠前者）
     z_counter = [0]
     skipped: list = []
     elems: list = []
     for ch in root:
-        ve = _walk(ch, z_counter, skipped)
+        ve = _walk(ch, z_counter, skipped, id_map)
         if ve is not None:
             elems.append(ve)
     return elems, skipped, meta
@@ -439,6 +528,7 @@ def make_editable_text_item(text: str):
     class EditableTextItem(QtWidgets.QGraphicsTextItem):
         _moved_this_drag = False
         _move_cb = None
+        _snap_cb = None
 
         def focusOutEvent(self, e):
             super().focusOutEvent(e)
@@ -462,11 +552,13 @@ def make_editable_text_item(text: str):
 
         def itemChange(self, change, value):
             # 编辑态下拖动是移光标（不发 ItemPositionChange），故只在真正移 item 时入撤销，安全。
-            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange \
-                    and not self._moved_this_drag:
-                self._moved_this_drag = True
-                if self._move_cb is not None:
-                    self._move_cb("移动矢量元素")
+            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+                if not self._moved_this_drag:
+                    self._moved_this_drag = True
+                    if self._move_cb is not None:
+                        self._move_cb("移动矢量元素")
+                if self._snap_cb is not None:
+                    value = self._snap_cb(value)  # 磁吸：吸到其它元素/画布/参考线/网格
             return super().itemChange(change, value)
 
         def mousePressEvent(self, e):
@@ -487,13 +579,16 @@ def make_vector_path_item(qpath):
     class VectorPathItem(QtWidgets.QGraphicsPathItem):
         _moved_this_drag = False
         _move_cb = None
+        _snap_cb = None
 
         def itemChange(self, change, value):
-            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange \
-                    and not self._moved_this_drag:
-                self._moved_this_drag = True
-                if self._move_cb is not None:
-                    self._move_cb("移动矢量元素")
+            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+                if not self._moved_this_drag:
+                    self._moved_this_drag = True
+                    if self._move_cb is not None:
+                        self._move_cb("移动矢量元素")
+                if self._snap_cb is not None:
+                    value = self._snap_cb(value)  # 磁吸：吸到其它元素/画布/参考线/网格
             return super().itemChange(change, value)
 
         def mousePressEvent(self, e):
@@ -514,13 +609,16 @@ def make_vector_group_item():
     class VectorGroupItem(QtWidgets.QGraphicsItemGroup):
         _moved_this_drag = False
         _move_cb = None
+        _snap_cb = None
 
         def itemChange(self, change, value):
-            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange \
-                    and not self._moved_this_drag:
-                self._moved_this_drag = True
-                if self._move_cb is not None:
-                    self._move_cb("移动矢量元素")
+            if change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+                if not self._moved_this_drag:
+                    self._moved_this_drag = True
+                    if self._move_cb is not None:
+                        self._move_cb("移动矢量元素")
+                if self._snap_cb is not None:
+                    value = self._snap_cb(value)  # 磁吸：吸到其它元素/画布/参考线/网格
             return super().itemChange(change, value)
 
         def mousePressEvent(self, e):

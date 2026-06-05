@@ -30,6 +30,43 @@ def _scan_items_recursive(d: Path):
     return items
 
 
+def scan_asset_tree(root):
+    """扫描成【文件夹树】（BioRender 式分类→子分类）：每个文件夹一个节点
+    {name, path, items:[直属图 {file,path}], children:[子节点]}。
+    点某节点只加载它的【直属】图(不递归) → 每次只显几十张，上万素材也不卡。
+    返回 (root_node, all_items, err)；all_items=全树拍平(供全局搜索)。坏子目录跳过，不抛。"""
+    if not root:
+        return None, [], "未指定素材文件夹"
+    d = Path(str(root))
+    if not d.is_dir():
+        return None, [], "素材文件夹不存在：%s" % root
+    all_items = []
+
+    def build(folder):
+        items, children = [], []
+        try:
+            entries = sorted(folder.iterdir(), key=lambda x: x.name.lower())
+        except Exception:
+            entries = []
+        for p in entries:
+            try:
+                if p.is_file() and p.suffix.lower() in IMG_EXTS:
+                    rec = {"file": p.name, "path": str(p)}
+                    items.append(rec); all_items.append(rec)
+                elif p.is_dir():
+                    ch = build(p)
+                    if ch["items"] or ch["children"]:  # 跳过空文件夹
+                        children.append(ch)
+            except Exception:
+                continue
+        return {"name": folder.name, "path": str(folder), "items": items, "children": children}
+
+    node = build(d)
+    if not node["items"] and not node["children"]:
+        return None, [], "该文件夹下没有图片素材"
+    return node, all_items, None
+
+
 def scan_assets(root):
     """扫描本地素材根目录 → (groups, err)。
     groups: [{name, items:[{file, path}]}]；name=分类名（顶层散图归「未分类」）。

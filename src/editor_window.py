@@ -134,8 +134,10 @@ class LayerRow(QtWidgets.QWidget):
         # 右键菜单：上移/下移层级、勾选打组、重命名、删除（行内按钮收进这里，对齐 PS 靠拖拽+底栏）
         ed, layer = self._editor, self._layer
         m = QtWidgets.QMenu(self)
+        m.addAction("置顶", lambda: ed._layer_z("front", layer))
         m.addAction("上移一层", lambda: ed._move_layer(layer, +1))
         m.addAction("下移一层", lambda: ed._move_layer(layer, -1))
+        m.addAction("置底", lambda: ed._layer_z("back", layer))
         m.addSeparator()
         act_mark = m.addAction("取消勾选打组" if self._marked else "勾选以打组")
         act_mark.triggered.connect(lambda *_: ed._toggle_mark(layer))
@@ -752,9 +754,27 @@ class EditorWindow(QtWidgets.QMainWindow):
         re_act = em.addAction("重新选择", self.reselect)  # PS Reselect：恢复上次取消的选区
         re_act.setShortcut("Ctrl+Shift+D")
         re_act.setToolTip("重新选择：恢复最后一次取消掉的选区 (Ctrl+Shift+D)")
+        em.addSeparator()
+        # Ctrl+C/Ctrl+V 不在此注册快捷键（会抢占就地编辑文字时的复制粘贴）→ 实际按键在 CanvasView.keyPressEvent 处理
+        cp_act = em.addAction("复制图层 (Ctrl+C)", self.copy_to_clipboard)
+        cp_act.setToolTip("把当前图层复制为图片到剪贴板（可粘回 / 粘到外部应用）")
+        pa_act = em.addAction("粘贴 (Ctrl+V)", self.paste_from_clipboard)
+        pa_act.setToolTip("把剪贴板里的图片作为新图层粘到画布（外部复制的图也能粘进来）")
+        em.addSeparator()
+        zsub = em.addMenu("图层层级")  # 置顶/上移/下移/置底（作用活动层）
+        _za = zsub.addAction("置顶", lambda: self._layer_z("front")); _za.setShortcut("Ctrl+Shift+]")
+        _za = zsub.addAction("上移一层", lambda: self._layer_z("forward")); _za.setShortcut("Ctrl+]")
+        _za = zsub.addAction("下移一层", lambda: self._layer_z("backward")); _za.setShortcut("Ctrl+[")
+        _za = zsub.addAction("置底", lambda: self._layer_z("back")); _za.setShortcut("Ctrl+Shift+[")
 
         img_menu = self.menuBar().addMenu("图像")
         img_menu.addAction("亮度/对比度…", self.brightness_contrast_dialog)
+        img_menu.addSeparator()
+        # 翻转/旋转：作用于选中的矢量元素，或活动图层（矢量绕中心 QTransform；栅格转像素）
+        img_menu.addAction("水平翻转", lambda: self._flip_objects(True))
+        img_menu.addAction("垂直翻转", lambda: self._flip_objects(False))
+        img_menu.addAction("顺时针旋转 90°", lambda: self._rotate_objects(90))
+        img_menu.addAction("逆时针旋转 90°", lambda: self._rotate_objects(270))
 
         view = self.menuBar().addMenu("视图")
         self._view_menu = view
@@ -779,6 +799,21 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._act_guides.setChecked(True)
         self._act_guides.triggered.connect(self._toggle_guides)
         view.addAction(self._act_guides)
+        view.addSeparator()
+        self._snap_grid = False
+        self._act_grid = QtGui.QAction("显示网格", self, checkable=True)
+        self._act_grid.setShortcut("Ctrl+'")
+        self._act_grid.triggered.connect(lambda on: self.view.set_grid(on))
+        view.addAction(self._act_grid)
+        self._act_snapgrid = QtGui.QAction("吸附到网格", self, checkable=True)
+        self._act_snapgrid.triggered.connect(lambda on: setattr(self, "_snap_grid", bool(on)))
+        view.addAction(self._act_snapgrid)
+        gsub = view.addMenu("网格大小")
+        ggrp = QtGui.QActionGroup(self); ggrp.setExclusive(True)
+        for _px in (10, 20, 25, 50):
+            _ga = QtGui.QAction("%d px" % _px, self, checkable=True); _ga.setChecked(_px == 20)
+            _ga.triggered.connect(lambda _=False, p=_px: self.view.set_grid_size(p))
+            ggrp.addAction(_ga); gsub.addAction(_ga)
         view.addAction("清除参考线", self._clear_guides)
         view.addSeparator()
         # FPS 性能浮标：默认关，放「视图」菜单里方便随时勾选/取消（诊断卡顿用）
@@ -1125,7 +1160,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             # 选区组（select 槽：画选区族，默认 rectsel 在组首）
             [("rectsel", "矩形选框：拖框生成矩形选区（Shift 加选 / Alt 减选；可作 GrabCut 种子/删除选区，不直接抠出）"),
              ("lasso", "套索：手绘闭环选区（Shift 加选 / Alt 减选）"),
-             ("wand", "魔棒：点击按颜色新建选区（加/减选请用套索/选区画笔的 Shift/Alt）"),
+             ("wand", "魔棒：点击按颜色选区（Shift 加选 / Alt 减选 / 默认新建）"),
              ("brush", "选区画笔：涂抹累积选区（Shift 加选 / Alt 减选）")],
             # 裁切组（cut 槽：切图族，默认 rect 在组首）
             [("rect", "矩形抠出：拖框直接抠成可移动层（勾剪切模式则原位填底）"),
@@ -1136,13 +1171,19 @@ class EditorWindow(QtWidgets.QMainWindow):
              ("text", "文字：拖框=定宽文本框/单击=放置；移动工具双击可改")],
             [("pen", "钢笔：点击加角点 / 拖拽加平滑锚 → 画新矢量路径（Enter/双击结束·回起点闭合·Esc 取消）"),
              ("node", "锚点：选中单个矢量 path 后编辑锚点（拖锚移点·拖柄改曲率·Alt/双击段上加锚·选锚 Del 删）")],
+            # 形状组（shape 槽：画矢量形状，默认 sh_rect 在组首）
+            [("sh_rect", "矩形：拖框画矩形（Shift = 正方形）→ 可移动/改色的矢量形状"),
+             ("sh_ellipse", "椭圆：拖框画椭圆 / 圆（Shift = 正圆）"),
+             ("sh_line", "直线：拖画直线（Shift 吸 0/45/90°）"),
+             ("sh_arrow", "箭头：拖画带箭头的线（Shift 吸角度）—— 通路/流程图常用")],
             [("measure", "测量：拖画测量线，选项栏读 X/Y/W/H/角度/长度；可设比例换算真实尺寸、按角度拉直活动层"),
              ("zoom", "缩放 / 放大镜（左键放大·右键或 Alt 缩小）")],
         ]
         # flyout 工具组：tool → 槽 id；同槽工具收进一个 FlyoutToolButton（右下角小三角 + 右键弹菜单选用哪个 +
         # 左键用上次选的）。第一遍建好所有 QAction 并按槽收集成员，第二遍布局工具栏（flyout 按钮拿到【完整】成员列表）。
         FLYOUT_OF = {"rectsel": "select", "lasso": "select", "wand": "select", "brush": "select",
-                     "rect": "cut", "erase": "cut", "crop": "cut"}
+                     "rect": "cut", "erase": "cut", "crop": "cut",
+                     "sh_rect": "shape", "sh_ellipse": "shape", "sh_line": "shape", "sh_arrow": "shape"}
         self._flyout_btns = {}     # 槽 id → FlyoutToolButton（set_tool 末尾据此同步按钮图标）
         self._tool_flyout = dict(FLYOUT_OF)  # tool → 槽 id（供 _sync_flyout 反查）
         flyout_members = {}        # 槽 id → [QAction]（按遇到顺序累积，组内首个=默认）
@@ -1155,6 +1196,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             "rect": "矩形抠出", "erase": "矩形挖洞", "crop": "裁剪",
             "draw": "画笔", "eraser": "橡皮擦", "text": "文字",
             "pen": "钢笔", "node": "锚点", "measure": "测量", "zoom": "缩放",
+            "sh_rect": "矩形", "sh_ellipse": "椭圆", "sh_line": "直线", "sh_arrow": "箭头",
         }
 
         def make_action(tool, tip):
@@ -1278,8 +1320,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         b_aiseg.setToolTip("用 AI 分割后端抠出前景/拆成多个元素，结果入素材库；适合魔棒拆不动的彩色 biorender 图。需先在弹出设置里配置后端")
         b_aiseg.clicked.connect(self.do_ai_segment)
         sl.addWidget(b_aiseg)
-        sl.addWidget(self._hint("起选区：套索/选区画笔涂 · 魔棒按颜色点(新建) · Ctrl 点图层=载入该层为选区。\n"
-                                "连续精修：套索/选区画笔 按 Shift 加选 / Alt 减选（Ctrl+Shift/Ctrl+Alt 点图层=加/减该层）。\n"
+        sl.addWidget(self._hint("起选区：套索/选区画笔涂 · 魔棒按颜色点 · Ctrl 点图层=载入该层为选区。\n"
+                                "连续精修：套索/选区画笔/魔棒 按 Shift 加选 / Alt 减选（Ctrl+Shift/Ctrl+Alt 点图层=加/减该层）。\n"
                                 "Esc 取消 · Ctrl+Shift+D 重新选择 · 选区→加入素材库 / Ctrl+J 抠到新图层。"))
         sl.addStretch(1)
 
@@ -1400,9 +1442,10 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.asset_list.itemClicked.connect(self._asset_clicked)
         self.asset_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键删除/导出单个素材
         self.asset_list.customContextMenuRequested.connect(self._asset_menu)
-        _del_sc = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Delete), self.asset_list)
-        _del_sc.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)  # 仅素材库聚焦时 Del 删选中素材
-        _del_sc.activated.connect(self._delete_selected_asset)
+        for _sk in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):  # Del 和 退格 都能删选中素材
+            _del_sc = QtGui.QShortcut(QtGui.QKeySequence(_sk), self.asset_list)
+            _del_sc.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)  # 仅素材库聚焦时生效
+            _del_sc.activated.connect(self._delete_selected_asset)
         al.addWidget(self.asset_list, 1)
         arow = QtWidgets.QHBoxLayout()
         b_expa = QtWidgets.QPushButton("导出全部"); b_expa.setToolTip("把素材库每个元素各存为一张透明 PNG")
@@ -1429,19 +1472,43 @@ class EditorWindow(QtWidgets.QMainWindow):
         b_exp_cat.clicked.connect(self._export_assets_by_category)
         _mfrow.addWidget(b_gen_mf); _mfrow.addWidget(b_exp_cat)
         al.addLayout(_mfrow)
-        self.asset_cat = QtWidgets.QComboBox()
-        self.asset_cat.setToolTip("素材分类（=素材文件夹下的子文件夹名）")
-        self.asset_cat.currentIndexChanged.connect(self._on_asset_cat)
-        al.addWidget(self.asset_cat)
+        # 分类树（BioRender 式：分类→子分类，点哪个只加载它的直属图 → 海量库不卡）
+        self.asset_tree = QtWidgets.QTreeWidget()
+        self.asset_tree.setHeaderHidden(True)
+        self.asset_tree.setMaximumHeight(170)
+        self.asset_tree.setToolTip("素材分类树（=文件夹结构）。点一个分类→只加载它的直属图；子分类点开再看，不卡。")
+        self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
+        al.addWidget(self.asset_tree)
+        # 全局搜索（跨所有分类按名字找）
+        _srow = QtWidgets.QHBoxLayout()
+        self.asset_search = QtWidgets.QLineEdit()
+        self.asset_search.setPlaceholderText("🔍 搜索素材名（跨全部分类）…")
+        self.asset_search.setClearButtonEnabled(True)
+        self._asset_filter = ""
+        self._asset_cur_items = []
+        self._asset_all_items = []
+        self._search_timer = QtCore.QTimer(self); self._search_timer.setSingleShot(True); self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self._apply_asset_search)
+        self.asset_search.textChanged.connect(lambda *_: self._search_timer.start())
+        _srow.addWidget(self.asset_search, 1)
+        self.asset_fs_count = QtWidgets.QLabel(""); self.asset_fs_count.setObjectName("hint")
+        _srow.addWidget(self.asset_fs_count)
+        al.addLayout(_srow)
         self.asset_fs_list = AssetListWidget()
         self.asset_fs_list.setObjectName("assetGrid")  # 同样给本地素材卡片边界
         self.asset_fs_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
-        self.asset_fs_list.setIconSize(QtCore.QSize(72, 72))
+        self.asset_fs_list.setIconSize(QtCore.QSize(84, 84))
         self.asset_fs_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
         self.asset_fs_list.setMovement(QtWidgets.QListWidget.Movement.Static)
+        self.asset_fs_list.setUniformItemSizes(True)  # 等大格 → 海量项布局快
+        self.asset_fs_list.setLayoutMode(QtWidgets.QListView.LayoutMode.Batched)  # 分批布局，不一次卡死
+        self.asset_fs_list.setBatchSize(200)
         self.asset_fs_list.setDragEnabled(True)
         self.asset_fs_list.itemClicked.connect(self._fs_asset_clicked)  # 单击=放到画布中央（拖动=放到指定位置）
         self.asset_fs_list.setSpacing(4); self.asset_fs_list.setMinimumHeight(110)
+        self._thumb_timer = QtCore.QTimer(self); self._thumb_timer.setSingleShot(True); self._thumb_timer.setInterval(60)
+        self._thumb_timer.timeout.connect(self._lazy_decode_asset_thumbs)  # 滚动去抖 → 只解码可见缩略图
+        self.asset_fs_list.verticalScrollBar().valueChanged.connect(lambda *_: self._thumb_timer.start())
         al.addWidget(self.asset_fs_list, 1)
         self._asset_groups = []  # scan_assets 结果缓存：[{name, items:[{file, path}]}]
 
@@ -2134,7 +2201,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             item.setOpacity(d.get("opacity", 1.0))  # 恢复不透明度
             item.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not d.get("locked", False))
             item._move_cb = self._push_history
-            item._snap_cb = self._snap_layer_pos
+            item._snap_cb = (lambda pos, _it=item: self._snap_drag_pos(_it, pos))  # 统一磁吸(吸到所有元素)
             item._release_cb = self._clear_guides_overlay
             item.setVisible(d["visible"])
             # 非破坏蒙版：防御性 .copy()（与上面 image 同理），让恢复出的活动蒙版与历史格独立，撤销/重做不互相污染
@@ -2349,8 +2416,21 @@ class EditorWindow(QtWidgets.QMainWindow):
             self._refresh_layers()
 
     def _on_layer_pressed(self, layer: dict):  # 画布上按下某层 → 设为激活层（拖动时跟随）
-        if layer in self.layers:
-            self.selected_layers = [layer]  # 画布单击=单选（PS：不累加），与多选面板分离
+        if layer not in self.layers:
+            return
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        if mods & (QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.KeyboardModifier.ControlModifier):
+            # 画布上 Shift/Ctrl 点 = 多选（加入/移出选择集），用于对齐/分布——不必再去图层面板
+            if layer in self.selected_layers:
+                if len(self.selected_layers) > 1:
+                    self.selected_layers.remove(layer)
+            else:
+                self.selected_layers.append(layer)
+            self.active = layer
+            self._reselect_rows_by_uid([l.get("uid") for l in self.selected_layers])
+            self._update_outline()
+        else:
+            self.selected_layers = [layer]  # 无修饰键=单选（PS）
             if layer is not self.active:
                 self._set_active(layer)
 
@@ -2554,6 +2634,67 @@ class EditorWindow(QtWidgets.QMainWindow):
     # 吸附阈值（屏幕像素）：与对齐功能吸附共用；对齐若落地则复用此阈值与 _snap_layer_pos。
     _SNAP_PX = 6
 
+    def _all_drag_items(self):
+        """画布上所有可作磁吸目标的顶层元素（栅格层 item + 矢量层各 item），跳过隐藏层。"""
+        out = []
+        for l in self.layers:
+            if not l.get("visible", True):
+                continue
+            out.extend(self._layer_items(l))
+        return out
+
+    def _snap_drag_pos(self, item, new_pos: QtCore.QPointF) -> QtCore.QPointF:
+        """统一磁吸：把【正在拖的任意元素】（栅格层/形状/箭头/文字/抠图/AI拆解/素材…）外框的
+        左/中/右、上/中/下 吸到 其它元素 + 画布边·中线 + 参考线 + 网格。命中画洋红对齐线（AI/PS 式）。"""
+        if getattr(self, "_suspend_snap", False) or self.view._tool != "move" or not self.canvas_size:
+            return new_pos
+        sbr = item.sceneBoundingRect()
+        off = sbr.topLeft() - item.pos()  # 外框相对 pos 的偏移（含 transform/scale），随 pos 平移不变
+        bw, bh = sbr.width(), sbr.height()
+        cw, ch = self.canvas_size
+        tol = self._SNAP_PX / max(1e-6, self.view.current_zoom())
+        targets_x = [(x, (0.0, ch)) for x in self.view._guides_v]
+        targets_x += [(0.0, (0.0, ch)), (cw / 2.0, (0.0, ch)), (cw, (0.0, ch))]
+        targets_y = [(y, (0.0, cw)) for y in self.view._guides_h]
+        targets_y += [(0.0, (0.0, cw)), (ch / 2.0, (0.0, cw)), (ch, (0.0, cw))]
+        for other in self._all_drag_items():  # 其它每个元素的 左/中/右、上/中/下
+            if other is item:
+                continue
+            r = other.sceneBoundingRect()
+            sv = (r.top(), r.bottom()); sh = (r.left(), r.right())
+            targets_x += [(r.left(), sv), (r.center().x(), sv), (r.right(), sv)]
+            targets_y += [(r.top(), sh), (r.center().y(), sh), (r.bottom(), sh)]
+        nl = new_pos.x() + off.x(); nt = new_pos.y() + off.y()
+        guides = []; ndx = ndy = 0.0
+        best = None
+        for edge in (nl, nl + bw / 2.0, nl + bw):
+            for t, span in targets_x:
+                d = abs(edge - t)
+                if d < tol and (best is None or d < best[0]):
+                    best = (d, edge, t, span)
+        if best is not None:
+            ndx = best[2] - best[1]; a, b = best[3]
+            guides.append({"orient": "v", "pos": best[2], "span": (min(a, nt) - 20, max(b, nt + bh) + 20)})
+        best = None
+        for edge in (nt, nt + bh / 2.0, nt + bh):
+            for t, span in targets_y:
+                d = abs(edge - t)
+                if d < tol and (best is None or d < best[0]):
+                    best = (d, edge, t, span)
+        if best is not None:
+            ndy = best[2] - best[1]; a, b = best[3]
+            guides.append({"orient": "h", "pos": best[2], "span": (min(a, nl) - 20, max(b, nl + bw) + 20)})
+        if getattr(self, "_snap_grid", False):  # 网格吸附：该轴没被元素/参考线吸住时吸到网格
+            g = max(2, int(getattr(self.view, "_grid_size", 20)))
+            if not any(gd["orient"] == "v" for gd in guides):
+                ndx = (round(nl / g) * g) - nl
+            if not any(gd["orient"] == "h" for gd in guides):
+                ndy = (round(nt / g) * g) - nt
+        if guides != self._active_guides:
+            self._active_guides = guides
+            self.view.viewport().update()
+        return QtCore.QPointF(new_pos.x() + ndx, new_pos.y() + ndy)
+
     def _snap_layer_pos(self, new_pos: QtCore.QPointF) -> QtCore.QPointF:
         # 移动图层时把外框左/中/右、上/中/下吸附到 参考线 / 画布边·中线 / 其它可见层的对应边·中线
         # （itemChange 内调用，返回吸附后的 pos）。命中的目标线存 _active_guides → drawForeground 画洋红虚线。
@@ -2602,6 +2743,12 @@ class EditorWindow(QtWidgets.QMainWindow):
             ny = best[1]
             a, b = best[3]
             guides.append({"orient": "h", "pos": best[2], "span": (min(a, nx) - 20, max(b, nx + bw) + 20)})
+        if getattr(self, "_snap_grid", False):  # 网格吸附：该轴没被参考线吸住时取整到网格倍数（参考线优先）
+            g = max(2, int(getattr(self.view, "_grid_size", 20)))
+            if not any(gd["orient"] == "v" for gd in guides):
+                nx = round(nx / g) * g
+            if not any(gd["orient"] == "h" for gd in guides):
+                ny = round(ny / g) * g
         if guides != self._active_guides:  # 只在变化时重绘，省刷新
             self._active_guides = guides
             self.view.viewport().update()
@@ -2627,6 +2774,27 @@ class EditorWindow(QtWidgets.QMainWindow):
                 it.setZValue(k)
         self._refresh_layers()
         self.op_label.setText("调整层级")
+
+    def _layer_z(self, where: str, layer: dict = None):
+        """图层层级跳转：front=置顶 / back=置底 / forward=上移一层 / backward=下移一层。
+        self.layers 底→顶（index 0=最底/最低 z），z=index。默认作用活动层。"""
+        layer = layer or self.active
+        if layer is None or layer not in self.layers:
+            self.op_label.setText("没有可调层级的图层（先选中一层）"); return
+        i = self.layers.index(layer); n = len(self.layers)
+        if (where in ("front", "forward") and i == n - 1) or (where in ("back", "backward") and i == 0):
+            return  # 已在端点
+        self._push_history("调整层级")
+        self.layers.remove(layer)
+        m = len(self.layers)
+        j = {"front": m, "back": 0, "forward": min(m, i + 1), "backward": max(0, i - 1)}[where]
+        self.layers.insert(j, layer)
+        for k, l in enumerate(self.layers):
+            for it in self._layer_items(l):  # 矢量层整组同 z
+                it.setZValue(k)
+        self._refresh_layers()
+        self.op_label.setText({"front": "已置顶", "back": "已置底",
+                               "forward": "上移一层", "backward": "下移一层"}[where])
 
     def _reorder_layer(self, src_uid, dst_uid, before: bool):
         # 拖拽排序回调（DragLayerList.dropEvent）：把 src 层移到 dst 层的显示「之前/之后」。
@@ -2725,9 +2893,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         form.addRow("地址", base_url)
         key_input = QtWidgets.QLineEdit()
         key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        key_input.setPlaceholderText(
-            (conn["key_hint"] + "（已保存·留空=不改）") if conn["has_key"] and conn["key_hint"]
-            else "API Key，留空=不改；仅存本机 ~/.sciedit")
+        key_input.setText(config.read_seg_key() or "")  # 回填已存 Key（密码打码，点眼睛才显），看得出已存
+        key_input.setPlaceholderText("API Key（仅存本机 ~/.sciedit，不外传；点 👁 可查看）")
         key_eye = QtWidgets.QToolButton(); key_eye.setText("👁"); key_eye.setCheckable(True)
         key_eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         key_eye.setToolTip("显示 / 隐藏 Key（仅本机查看，不外传）")
@@ -2835,8 +3002,12 @@ class EditorWindow(QtWidgets.QMainWindow):
             return
         conn = config.get_seg_conn()
         provider = conn["provider"]
-        # http/ppio 未配置 → 先弹设置（用户可能在对话框里把后端改成 grsai/rembg）
-        if provider in ("http", "ppio") and (not conn["base_url"] or not conn["has_key"]):
+        # http/ppio 未配置 → 先弹设置（用户可能在对话框里把后端改成 grsai/rembg）。
+        # 注意：ppio 有内置默认地址(api.ppinfra.com)，【只需 Key】——绝不能把"地址为空"当未配置，
+        # 否则配好 Key 也每次点都弹设置框、功能永远跑不起来（用户反馈的反复弹窗 bug）。
+        need_cfg = ((provider == "http" and (not conn["base_url"] or not conn["has_key"]))
+                    or (provider == "ppio" and not conn["has_key"]))
+        if need_cfg:
             if not self._ai_seg_settings_dialog():
                 return                                     # 用户取消
             conn = config.get_seg_conn()
@@ -2856,9 +3027,13 @@ class EditorWindow(QtWidgets.QMainWindow):
         elif provider == "rembg":
             base_url, key, model = "", "", ""              # 本地，无需地址/key
         else:                                              # http / ppio
-            if not conn["base_url"] or not conn["has_key"]:
-                self.op_label.setText("AI 抠图：未配置后端")  # fail-loud
+            if provider == "http" and (not conn["base_url"] or not conn["has_key"]):
+                self.op_label.setText("AI 抠图：HTTP 后端需填「地址」+「Key」")  # fail-loud
                 return
+            if provider == "ppio" and not conn["has_key"]:
+                self.op_label.setText("AI 抠图：PPIO 后端需填「Key」")  # fail-loud
+                return
+            # ppio 地址留空 → seg_client 用内置默认 api.ppinfra.com（_segment_ppio 兜底）
             base_url, key, model = config.seg_base(), config.read_seg_key(), conn["model"]
         if (self._seg_worker and self._seg_worker.isRunning()
                 and getattr(self._seg_worker, "_epoch", -1) == self._seg_epoch):
@@ -3368,6 +3543,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         # （拖子项时只子项收 itemChange；拖整组时只 group 收 → group 和叶子都要挂）。
         it._move_cb = self._push_history
         it._moved_this_drag = False
+        it._snap_cb = (lambda pos, _it=it: self._snap_drag_pos(_it, pos))  # 统一磁吸(吸到所有元素/画布/参考线/网格)
         if isinstance(it, QtWidgets.QGraphicsItemGroup):
             for child in it.childItems():
                 self._wire_vec_item(child)
@@ -4745,44 +4921,34 @@ class EditorWindow(QtWidgets.QMainWindow):
             self.scene.removeItem(st["rubber"])
         self._pen_state = None
 
-    def _finish_pen(self, closed: bool):
-        st = self._pen_state
-        if st is None or len(st["anchors"]) < 2:
-            self._cancel_pen()
-            return
-        n = len(st["anchors"])
-        subpaths = [{"anchors": list(st["anchors"]), "closed": closed}]
-        qp = svg_io.anchors_to_path(subpaths)
-        self._cancel_pen()  # 先清预览（销毁所有 __pen_preview__ item）
-        self._push_history("钢笔新建路径")  # 建 path 前快照 → 撤销=移除该 path/层
-        ve = svg_io.VElem(type="path", qpath=qp, fill=None, stroke="#000000", stroke_width=1.0)
-        # 落地：当前 active 是【未锁定】矢量层 → 并入；否则新建 kind=vector 层
-        target_layer = self.active if (self.active and self.active.get("kind") == "vector"
-                                       and not self.active.get("locked")) else None
-        if target_layer is not None:
-            it = svg_io._to_item(ve)
-            it.setZValue(max((p[0].zValue() for p in target_layer["pairs"]), default=len(self.layers)))  # 叠该层最上（审核 LOW）
+    def _register_vec_path(self, ve, hist_label: str, name_fn):
+        """把一个 path/shape VElem 落地：当前 active 是【未锁定】矢量层→并入；否则新建 kind=vector 层。
+        钢笔 / 形状 / 箭头共用这一条注册管线（DRY）。建前 push 历史 → 撤销=移除该元素/层。返回 (item, layer)。"""
+        self._push_history(hist_label)
+        target = self.active if (self.active and self.active.get("kind") == "vector"
+                                 and not self.active.get("locked")) else None
+        it = svg_io._to_item(ve)
+        if target is not None:
+            it.setZValue(max((p[0].zValue() for p in target["pairs"]), default=len(self.layers)))  # 叠该层最上
             self.scene.addItem(it)
             self._wire_vec_item(it)
-            target_layer["pairs"].append((it, ve))
-            target_layer["items"] = [x for x, _ in target_layer["pairs"]]
-            target_layer["velems"] = [v for _, v in target_layer["pairs"]]
-            target_layer["item"] = target_layer["items"][0]
-            self._set_active(target_layer)
+            target["pairs"].append((it, ve))
+            target["items"] = [x for x, _ in target["pairs"]]
+            target["velems"] = [v for _, v in target["pairs"]]
+            target["item"] = target["items"][0]
+            self._set_active(target)
+            layer = target
         else:
             if self.canvas_size is None:
                 self.canvas_size = DEFAULT_CANVAS
                 self.scene.setSceneRect(0, 0, DEFAULT_CANVAS[0], DEFAULT_CANVAS[1])
-            it = svg_io._to_item(ve)
-            base_z = len(self.layers)
-            it.setZValue(base_z)
+            it.setZValue(len(self.layers))
             self.scene.addItem(it)
             self._wire_vec_item(it)
             self._layer_uid += 1
             cw, ch = self.canvas_size
             layer = {
-                "name": f"钢笔路径 {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}",
-                "kind": "vector", "items": [it], "pairs": [(it, ve)], "velems": [ve],
+                "name": name_fn(), "kind": "vector", "items": [it], "pairs": [(it, ve)], "velems": [ve],
                 "meta": {"width": cw, "height": ch, "viewBox": f"0 0 {cw} {ch}"},
                 "item": it, "visible": True, "locked": False, "uid": self._layer_uid,
                 "group": None, "svg_path": None,
@@ -4790,7 +4956,89 @@ class EditorWindow(QtWidgets.QMainWindow):
             self.layers.append(layer)
             self._set_active(layer)
         self._refresh_layers()
+        return it, layer
+
+    def _finish_pen(self, closed: bool):
+        st = self._pen_state
+        if st is None or len(st["anchors"]) < 2:
+            self._cancel_pen()
+            return
+        n = len(st["anchors"])
+        qp = svg_io.anchors_to_path([{"anchors": list(st["anchors"]), "closed": closed}])
+        self._cancel_pen()  # 先清预览（销毁所有 __pen_preview__ item）
+        ve = svg_io.VElem(type="path", qpath=qp, fill=None, stroke="#000000", stroke_width=1.0)
+        self._register_vec_path(
+            ve, "钢笔新建路径",
+            lambda: f"钢笔路径 {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}")
         self.op_label.setText(f"钢笔新建{'闭合' if closed else '开放'}路径：{n} 个锚点")
+
+    # ----- 形状工具：矩形 / 椭圆 / 直线 / 箭头（拖框画，落地为 path VElem，复用 _register_vec_path）-----
+    _SHAPE_NAMES = {"sh_rect": "矩形", "sh_ellipse": "椭圆", "sh_line": "直线", "sh_arrow": "箭头"}
+
+    def _shape_path(self, tool: str, p0: QtCore.QPointF, p1: QtCore.QPointF, constrain: bool):
+        """按工具 + 起止点构造 QPainterPath（scene 坐标，与钢笔一致）。constrain(Shift)：方/圆 / 直线吸 45°。
+        箭头：直线 + 箭头三角形【烘焙进同一条 path】（几何照搬 Qt Diagram Scene Example）。"""
+        import math
+        qp = QtGui.QPainterPath()
+        if tool in ("sh_rect", "sh_ellipse"):
+            if constrain:  # 正方形 / 正圆：以 p0 为角，向拖动方向取等边
+                dx, dy = p1.x() - p0.x(), p1.y() - p0.y()
+                s = min(abs(dx), abs(dy))
+                p1 = QtCore.QPointF(p0.x() + (s if dx >= 0 else -s), p0.y() + (s if dy >= 0 else -s))
+            r = QtCore.QRectF(p0, p1).normalized()
+            qp.addRect(r) if tool == "sh_rect" else qp.addEllipse(r)
+            return qp
+        # 直线 / 箭头
+        e = QtCore.QPointF(p1)
+        if constrain:  # 吸 0/45/90°
+            dx, dy = p1.x() - p0.x(), p1.y() - p0.y()
+            L = math.hypot(dx, dy)
+            snap = math.radians(round(math.degrees(math.atan2(dy, dx)) / 45.0) * 45.0)
+            e = QtCore.QPointF(p0.x() + L * math.cos(snap), p0.y() + L * math.sin(snap))
+        qp.moveTo(p0); qp.lineTo(e)
+        if tool == "sh_arrow":
+            line = QtCore.QLineF(e, p0)  # 尖端→起点（与 Qt 示例一致的方向）
+            L = line.length()
+            if L >= 1.0:
+                ang = math.acos(max(-1.0, min(1.0, line.dx() / L)))
+                if line.dy() >= 0:
+                    ang = (math.pi * 2.0) - ang
+                size = max(8.0, min(22.0, L * 0.22))
+                a1 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi / 3.0) * size,
+                                                math.cos(ang + math.pi / 3.0) * size)
+                a2 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi - math.pi / 3.0) * size,
+                                                math.cos(ang + math.pi - math.pi / 3.0) * size)
+                qp.moveTo(e); qp.lineTo(a1); qp.lineTo(a2); qp.closeSubpath()  # 实心箭头三角形
+        return qp
+
+    def _shape_start(self, sp: QtCore.QPointF):
+        self._shape_p0 = sp; self._shape_p1 = sp
+        self._start_preview()
+
+    def _shape_move(self, sp: QtCore.QPointF):
+        if getattr(self, "_shape_p0", None) is None or self._sel_preview is None:
+            return
+        self._shape_p1 = sp
+        constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        self._sel_preview.setPath(self._shape_path(self.view._tool, self._shape_p0, sp, constrain))
+
+    def _shape_end(self):
+        p0 = getattr(self, "_shape_p0", None)
+        if p0 is None:
+            return
+        p1 = self._shape_p1; self._shape_p0 = None; self._remove_preview()
+        tool = self.view._tool
+        constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if QtCore.QLineF(p0, p1).length() < 3:  # 太小=误点，忽略
+            return
+        qp = self._shape_path(tool, p0, p1, constrain)
+        nm = self._SHAPE_NAMES.get(tool, "形状")
+        fill = "#333333" if tool == "sh_arrow" else None  # 箭头三角形实心；矩形/椭圆/线=描边轮廓
+        ve = svg_io.VElem(type="path", qpath=qp, fill=fill, stroke="#333333", stroke_width=2.0)
+        self._register_vec_path(
+            ve, f"画{nm}",
+            lambda: f"{nm} {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}")
+        self.op_label.setText(f"已画{nm}（拖动可移动·右侧矢量属性改色/描边·Shift 约束方圆/角度）")
 
     # ----- 矢量内部编辑结果上浮（B3 起已入历史，纯 op_label，无「不可撤销」提示）-----
     def _note_vec_edit(self, msg: str):
@@ -4808,6 +5056,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         tool = self.view._tool
         if tool == "wand":
             self._wand_at(scene_pos); return
+        if tool.startswith("sh_"):  # 形状工具：矩形/椭圆/直线/箭头
+            self._shape_start(scene_pos); return
         if tool in ("lasso", "brush") and self.selection_mask is not None \
                 and self._point_in_selection(scene_pos):
             mods = QtWidgets.QApplication.keyboardModifiers()
@@ -4838,6 +5088,8 @@ class EditorWindow(QtWidgets.QMainWindow):
 
     def _paint_move(self, scene_pos: QtCore.QPointF):
         tool = self.view._tool
+        if tool.startswith("sh_"):
+            self._shape_move(scene_pos); return
         if tool == "lasso":
             self._lasso_move(scene_pos); return
         if tool == "brush":
@@ -4849,6 +5101,8 @@ class EditorWindow(QtWidgets.QMainWindow):
 
     def _paint_end(self):
         tool = self.view._tool
+        if tool.startswith("sh_"):
+            self._shape_end(); return
         if tool == "lasso":
             self._lasso_end(); return
         if tool == "brush":
@@ -4887,8 +5141,8 @@ class EditorWindow(QtWidgets.QMainWindow):
 
     # ---------- OpenCV 魔棒 / 去背景 / 抠出 ----------
     def _wand_at(self, scene_pos: QtCore.QPointF):
-        # 魔棒：点击选中相近颜色区域 → 总是【新建选区(替换)】，不参与加/减选（用户指定）。
-        # 它只负责"按颜色快速起一个选区"；之后的连续加/减选用 套索/选区画笔（Shift 加 / Alt 减）或 Ctrl 点图层。
+        # 魔棒：点击按颜色选中相近区域。Shift=加选 / Alt=减选 / 否则按当前模式（默认新建）——支持多区域加减选。
+        # 走统一的 _set_selection（_effective_mode 实时读修饰键 + _compose_selection 合成），与套索/选区画笔一致。
         if not self._need_active_for_sel():
             return
         item = self.active["item"]
@@ -4900,10 +5154,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         rgba = image_ops.qimage_to_rgba(img)
         mask = image_ops.magic_wand_mask(rgba, x, y, self.tol_slider.value())
         if not mask.any():
-            self._clear_selection(); self.op_label.setText("魔棒未选中区域（调容差再试）"); return
-        self.selection_mask = mask  # 直接替换，不走 _set_selection 的加/减合成
-        self._show_ants()
-        self.op_label.setText(f"魔棒选区 {int((mask > 0).sum())} px（新建；加/减选用套索/选区画笔）")
+            self.op_label.setText("魔棒未选中区域（调容差再试）"); return  # 空命中不清已有选区（减选时尤其重要）
+        self._set_selection(mask)  # Shift 加 / Alt 减 / 否则当前模式（默认新建·替换）
 
     def _set_sel_mode(self, k: str):
         # 选区模式唯一入口：写状态 + 同步右侧原按钮组和选项栏镜像按钮组（两个入口指向同一状态，DRY）。
@@ -5459,13 +5711,24 @@ class EditorWindow(QtWidgets.QMainWindow):
                 "2. 再点「GrabCut 抠图」，它会把主体从背景里抠出来 → 进素材库\n\n"
                 "（抠整张多元素图请改用「去背景」或「自动拆解」。）")
             return
-        # 主线程阻塞的 cv2 操作：只给等待光标（busy 动画无法滚动，因事件循环不转）。
-        # TODO: 要真滚动进度条需把 grabcut_mask 挪到 QThread worker（明显更大改动，超出"点按钮弹进度条"需求）。
+        # 逐次迭代 + QProgressDialog 真进度条（每步 processEvents 刷新；可取消）——不再只给等待光标干转。
         self.op_label.setText("GrabCut 计算中…")
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        ITERS = 8  # 多分几步 → 进度条更顺
+        dlg = QtWidgets.QProgressDialog("GrabCut 抠图计算中…", "取消", 0, ITERS, self)
+        dlg.setWindowTitle("GrabCut 抠图")
+        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0); dlg.setAutoClose(True); dlg.setAutoReset(True); dlg.setValue(0)
+
+        def _cb(done, total):
+            dlg.setMaximum(total); dlg.setValue(done)
+            QtWidgets.QApplication.processEvents()  # 刷新进度条 + 响应取消
+            return not dlg.wasCanceled()
+
         ok = False
         try:
-            fg, err = image_ops.grabcut_mask(rgba, seed_mask=sel)
+            fg, err = image_ops.grabcut_mask(rgba, seed_mask=sel, iters=ITERS, progress_cb=_cb)
+            if dlg.wasCanceled():
+                self.op_label.setText("GrabCut 已取消"); return
             if err:
                 self.op_label.setText(err); return  # 大声失败，不静默
             sprite = image_ops.mask_to_sprite(rgba, fg, erode=True, feather=float(self.feather_slider.value()))
@@ -5475,7 +5738,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             self._refresh_assets()
             ok = True
         finally:
-            QtWidgets.QApplication.restoreOverrideCursor()  # 无论 return 与否都复原，不残留 override cursor
+            dlg.close()  # 无论成功/失败/取消都关进度条
         if not ok:
             return
         # 防呆：GrabCut 抠【单主体】，对宽幅多元素整图常只留中间团块、丢掉低对比边缘部分（用户反馈"抠出方的/缺了一块"）。
@@ -5772,6 +6035,77 @@ class EditorWindow(QtWidgets.QMainWindow):
         else:
             self.info_label.setText(f"{len(self.layers)} 层")
 
+    # ---------- 翻转 / 旋转（矢量元素用 QTransform 往返导出；栅格转像素，三处导出一致）----------
+    def _transform_targets(self):
+        """要变换的对象：选中的矢量元素优先；否则活动层。
+        返回 ("vector", [items]) / ("raster", layer) / (None, None)。"""
+        sel = [it for it in self.scene.selectedItems() if self._vector_layer_of_item(it) is not None]
+        if sel:
+            return "vector", sel
+        if self.active is None:
+            return None, None
+        if self.active.get("kind") == "vector":
+            return "vector", list(self.active.get("items") or [])
+        if self.active.get("image") is not None:
+            return "raster", self.active
+        return None, None
+
+    def _sync_vec_layers(self):
+        """把矢量 item 当前 transform/pos 回灌进各自 velem（变换后即时同步，供导出/撤销快照取到）。"""
+        for l in self._vector_layers():
+            svg_io.sync_items_to_velems(l.get("pairs", []))
+
+    def _flip_objects(self, horizontal: bool):
+        kind, tgt = self._transform_targets()
+        if kind is None:
+            self.op_label.setText("没有可翻转的对象（先选中矢量元素或一个图层）"); return
+        self._push_history("水平翻转" if horizontal else "垂直翻转")
+        if kind == "vector":
+            for it in tgt:  # 绕各自包围盒中心翻转（QTransform 组合，往返 SVG/PDF）
+                c = it.boundingRect().center()
+                t = QtGui.QTransform()
+                t.translate(c.x(), c.y())
+                t.scale(-1 if horizontal else 1, 1 if horizontal else -1)
+                t.translate(-c.x(), -c.y())
+                it.setTransform(t, True)
+            self._sync_vec_layers()
+        else:  # 栅格：镜像像素（镜像 mask 保持对齐）；导出/画布一致
+            layer = tgt
+            layer["image"] = layer["image"].mirrored(horizontal, not horizontal)
+            m = layer.get("mask")
+            if m is not None:
+                import numpy as np
+                layer["mask"] = (np.fliplr(m) if horizontal else np.flipud(m)).copy()
+                layer["item"].set_mask(layer["mask"])
+            layer["item"].set_image(layer["image"])
+        self._refresh_layers()
+        self.op_label.setText("已" + ("水平" if horizontal else "垂直") + "翻转")
+
+    def _rotate_objects(self, degrees: int):
+        kind, tgt = self._transform_targets()
+        if kind is None:
+            self.op_label.setText("没有可旋转的对象（先选中矢量元素或一个图层）"); return
+        self._push_history("旋转 %d°" % degrees)
+        if kind == "vector":
+            for it in tgt:
+                c = it.boundingRect().center()
+                t = QtGui.QTransform()
+                t.translate(c.x(), c.y()); t.rotate(degrees); t.translate(-c.x(), -c.y())
+                it.setTransform(t, True)
+            self._sync_vec_layers()
+        else:  # 栅格：转像素（90° 会换宽高）；mask 同向旋转保持对齐
+            layer = tgt
+            layer["image"] = layer["image"].transformed(QtGui.QTransform().rotate(degrees))
+            m = layer.get("mask")
+            if m is not None:
+                import numpy as np
+                k = -1 if (degrees % 360) == 90 else 1  # 匹配 QImage 顺时针 90° 方向
+                layer["mask"] = np.ascontiguousarray(np.rot90(m, k))
+                layer["item"].set_mask(layer["mask"])
+            layer["item"].set_image(layer["image"])
+        self._refresh_layers()
+        self.op_label.setText("已旋转 %d°" % degrees)
+
     def _render_composite(self):
         """底→顶合成所有【可见】层(含位置+缩放)到一张透明 QImage；空则 None。导出/魔棒取色共用。"""
         if not self.layers or not self.canvas_size:
@@ -5861,25 +6195,43 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._load_asset_dir()
 
     def _load_asset_dir(self):
-        """按已记住的素材目录扫描分类填进下拉框；无目录则清空。大声失败：无图时提示。"""
+        """按已记住的素材目录扫描成【分类树】填进 asset_tree；无目录则清空。大声失败：无图时提示。"""
         root = config.get_asset_dir()
-        self._asset_groups = []
-        self.asset_cat.blockSignals(True)
-        self.asset_cat.clear()
+        self.asset_tree.clear()
+        self.asset_fs_list.clear()
+        self._asset_cur_items = []; self._asset_all_items = []
         if not root:
-            self.asset_cat.blockSignals(False)
-            self.asset_fs_list.clear()
             return
-        groups, err = asset_lib.scan_assets(root)
+        node, all_items, err = asset_lib.scan_asset_tree(root)
         if err:
-            self.asset_cat.blockSignals(False)
-            self.asset_fs_list.clear()
             self.op_label.setText("素材库：%s" % err)
             return
-        self._asset_groups = groups
-        for g in groups:
-            self.asset_cat.addItem("%s（%d）" % (g["name"], len(g["items"])))
-        self.asset_cat.blockSignals(False)
+        self._asset_all_items = all_items
+        self._populate_asset_tree(node)
+        top = self.asset_tree.topLevelItem(0)  # 默认选根节点 → 显其直属图（分类在子节点里点开）
+        if top is not None:
+            self.asset_tree.setCurrentItem(top)
+            self._asset_cur_items = top.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
+        self._refresh_asset_thumbs()
+        self.op_label.setText("素材库：%d 张，已按文件夹分类（点分类树浏览/搜索）" % len(all_items))
+
+    def _populate_asset_tree(self, node):
+        """扫描树 → QTreeWidget。item 文本=「名（直属N）」，data 存该节点【直属】items。"""
+        def add(parent, nd):
+            label = "%s（%d）" % (nd["name"], len(nd["items"])) if nd["items"] else nd["name"]
+            it = QtWidgets.QTreeWidgetItem([label])
+            it.setData(0, QtCore.Qt.ItemDataRole.UserRole, nd["items"])
+            (self.asset_tree.addTopLevelItem if parent is None else parent.addChild)(it)
+            for ch in nd["children"]:
+                add(it, ch)
+            return it
+        add(None, node).setExpanded(True)  # 根展开，露出一级分类
+
+    def _on_asset_tree_click(self, item, _col=0):
+        """点分类 → 只加载它的【直属】图（不递归）→ 每次只显几十张，海量库不卡。"""
+        self._asset_cur_items = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
+        self.asset_search.blockSignals(True); self.asset_search.clear(); self.asset_search.blockSignals(False)
+        self._asset_filter = ""
         self._refresh_asset_thumbs()
 
     def _build_asset_manifest(self):
@@ -5889,18 +6241,33 @@ class EditorWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "生成分类索引", "请先点上面「连接素材文件夹」选一个目录")
             return
         import style_lib
-        nt, nf, err = style_lib.build_manifest(root)
+        self.op_label.setText("生成分类索引中…")
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            nt, nf, err = style_lib.build_manifest(root)
+        except Exception as e:  # 大声失败：异常不再被 Qt 静默吞掉(用户反馈"点了没反应")
+            nt = nf = 0
+            err = "生成失败：%s" % e
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
         if err:
-            QtWidgets.QMessageBox.warning(self, "生成分类索引", err)  # fail-loud
+            QtWidgets.QMessageBox.warning(self, "生成分类索引", "%s\n\n目录：%s" % (err, root))
+            self.op_label.setText("生成分类索引失败：%s" % err)
             return
         self._load_asset_dir()  # 重扫：此时读到刚生成的 manifest
-        self.op_label.setText("已生成分类索引：%d 个分类 / %d 张图（manifest.json）" % (nt, nf))
+        msg = "已生成分类索引：%d 个分类 / %d 张图" % (nt, nf)
+        if nt <= 1:  # 顶层平铺 → 只有一个「未分类」，明确告知怎么才能分类
+            msg += "\n\n注意：只有 1 个分类——图都在顶层、没分到子文件夹。\n要分多类，请把图按主题放进不同子文件夹后再点一次。"
+        self.op_label.setText(msg.split("\n")[0])
+        QtWidgets.QMessageBox.information(self, "生成分类索引", msg)  # 明确弹窗反馈，不只底部小字
 
     def _export_assets_by_category(self):
         """把本地素材库按【分类】导出到选定目录：每个分类一个子文件夹、复制其中每张图。
         flat+manifest 的图包可借此物理拆成分类文件夹。重名文件追加 _2/_3… 不静默覆盖（大声失败）。"""
-        if not self._asset_groups:
-            QtWidgets.QMessageBox.information(self, "按分类导出", "请先「连接素材文件夹」并确保里面有素材")
+        root = config.get_asset_dir()
+        groups, err = asset_lib.scan_assets(root) if root else ([], "未连接素材文件夹")
+        if err or not groups:
+            QtWidgets.QMessageBox.information(self, "按分类导出", err or "请先「连接素材文件夹」并确保里面有素材")
             return
         out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择导出目标文件夹（将按分类建子文件夹）")
         if not out:
@@ -5909,7 +6276,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         import re as _re
         import shutil as _shutil
         n_ok = n_fail = 0
-        for g in self._asset_groups:
+        for g in groups:
             safe = _re.sub(r'[\\/:*?"<>|]', "_", str(g["name"])).strip() or "未命名"
             sub = _os.path.join(out, safe)
             _os.makedirs(sub, exist_ok=True)
@@ -5927,36 +6294,74 @@ class EditorWindow(QtWidgets.QMainWindow):
                     n_ok += 1
                 except Exception:
                     n_fail += 1
-        msg = "按分类导出完成：%d 个分类 / %d 张图 → %s" % (len(self._asset_groups), n_ok, out)
+        msg = "按分类导出完成：%d 个分类 / %d 张图 → %s" % (len(groups), n_ok, out)
         if n_fail:
             msg += "；%d 张失败" % n_fail  # 大声失败：不把失败藏起来
         self.op_label.setText(msg)
         QtWidgets.QMessageBox.information(self, "按分类导出", msg)
 
-    def _on_asset_cat(self, _idx):
+    def _refresh_asset_thumbs(self):
+        """渲染：有搜索→全树过滤；否则→当前选中分类的【直属】图。只挂项不解码 + 懒解可见 → 不卡。"""
+        lst = self.asset_fs_list
+        lst.setUpdatesEnabled(False)
+        lst.clear()
+        flt = getattr(self, "_asset_filter", "")
+        if flt:
+            items = [it for it in self._asset_all_items if flt in it["file"].lower()]
+        else:
+            items = list(self._asset_cur_items or [])
+        total = len(items)
+        CAP = 800  # 单视图最多这么多（再多 QListWidget 本身就卡）→ 点子分类或搜索缩小
+        capped = total > CAP
+        if capped:
+            items = items[:CAP]
+        for it in items:
+            lw = QtWidgets.QListWidgetItem()  # 不解码 icon，只挂路径(拖拽/单击用)+提示
+            lw.setToolTip(it["file"])
+            lw.setData(QtCore.Qt.ItemDataRole.UserRole, it["path"])
+            lst.addItem(lw)
+        lst.setUpdatesEnabled(True)
+        if hasattr(self, "asset_fs_count"):
+            if capped:
+                self.asset_fs_count.setText("共%d·显%d" % (total, CAP))
+                self.asset_fs_count.setToolTip("该视图共 %d 张，显前 %d——点子分类或搜索缩小（一类放上万张会卡，建议拆子文件夹）" % (total, CAP))
+            elif flt:
+                self.asset_fs_count.setText("找到%d" % total); self.asset_fs_count.setToolTip("")
+            else:
+                self.asset_fs_count.setText(str(total)); self.asset_fs_count.setToolTip("")
+        self._thumb_timer.start()  # 布局就绪后解码首屏可见（去抖定时器）
+
+    def _apply_asset_search(self):
+        self._asset_filter = self.asset_search.text().strip().lower()
         self._refresh_asset_thumbs()
 
-    def _refresh_asset_thumbs(self):
-        """渲染当前分类的缩略图（QImageReader.setScaledSize 缩放解码，路径存 UserRole）。"""
-        self.asset_fs_list.clear()
-        i = self.asset_cat.currentIndex()
-        if not (0 <= i < len(self._asset_groups)):
+    def _lazy_decode_asset_thumbs(self):
+        """只解码当前可见(+上下各 30 预读)项的缩略图；已解码的跳过（item 持 icon + 解码标记）。"""
+        lst = self.asset_fs_list
+        n = lst.count()
+        if n == 0:
             return
-        TH = 72
-        for it in self._asset_groups[i]["items"]:
-            rd = QtGui.QImageReader(it["path"])  # 缩放解码，避免整张大图全解码（照搬 StyleLibraryDialog._thumb）
+        vp = lst.viewport().rect()
+        first = lst.indexAt(vp.topLeft()); last = lst.indexAt(vp.bottomRight())
+        a = first.row() if first.isValid() else 0
+        b = last.row() if last.isValid() else (a + 60)   # 布局未就绪/视口超出 → 只解码前一截，绝不误解全部
+        a = max(0, a - 30); b = min(n - 1, b + 30)
+        TH = max(48, lst.iconSize().width())  # 按当前缩略图大小解码（调大后更清晰）
+        DR = QtCore.Qt.ItemDataRole.UserRole + 1  # 解码完成标记
+        for r in range(a, b + 1):
+            lw = lst.item(r)
+            if lw is None or lw.data(DR):
+                continue
+            rd = QtGui.QImageReader(lw.data(QtCore.Qt.ItemDataRole.UserRole))  # 缩放解码，不全解大图
             rd.setAutoTransform(True)
             sz = rd.size()
             if sz.isValid() and (sz.width() > TH or sz.height() > TH):
                 sz.scale(TH, TH, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
                 rd.setScaledSize(sz)
             img = rd.read()
-            lw = QtWidgets.QListWidgetItem()
             if not img.isNull():
                 lw.setIcon(QtGui.QIcon(QtGui.QPixmap.fromImage(img)))
-            lw.setToolTip(it["file"])
-            lw.setData(QtCore.Qt.ItemDataRole.UserRole, it["path"])  # 拖拽取此路径
-            self.asset_fs_list.addItem(lw)
+            lw.setData(DR, True)
 
     def _place_asset(self, scene_pos: QtCore.QPointF, path: str):
         """素材拖到画布 drop 处：按原尺寸建图层，使图居中落在 scene_pos（clamp 不越界）。"""
@@ -5988,6 +6393,72 @@ class EditorWindow(QtWidgets.QMainWindow):
         cs = self.canvas_size  # 空画布时为 None：_place_asset 会按图尺寸初始化、忽略此处坐标
         center = QtCore.QPointF(cs[0] / 2, cs[1] / 2) if cs else QtCore.QPointF(0, 0)
         self._place_asset(center, path)
+
+    def copy_to_clipboard(self):
+        """复制当前激活图层为图片到系统剪贴板（可 Ctrl+V 粘回，或粘到外部应用）。"""
+        layer = self.active
+        if not layer:
+            self.op_label.setText("没有可复制的图层（先选中一个图层）"); return
+        if layer.get("kind") != "vector" and layer.get("image") is not None:
+            import image_ops
+            img = image_ops.masked_qimage(layer["image"], layer.get("mask"))  # 含蒙版的实际显示
+        else:
+            img = self._render_layer_image(layer)  # 矢量层：隔离渲染成图
+        if img is None or img.isNull():
+            self.op_label.setText("该图层无可复制内容"); return
+        QtWidgets.QApplication.clipboard().setImage(img)
+        self.op_label.setText("已复制图层到剪贴板（Ctrl+V 粘回 / 可粘到外部应用）")
+
+    def paste_from_clipboard(self):
+        """从系统剪贴板取图片，作为新图层粘到画布（外部应用复制的图也能粘进来）。"""
+        img = QtWidgets.QApplication.clipboard().image()
+        if img is None or img.isNull():
+            self.op_label.setText("剪贴板里没有图片"); return
+        img = img.convertToFormat(QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        ba = QtCore.QByteArray()
+        buf = QtCore.QBuffer(ba); buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG"); buf.close()
+        b64 = bytes(ba.toBase64()).decode("ascii")
+        self._push_history("粘贴")
+        if self._ai_place_b64(b64, push=False) is not None:  # 复用落图（居中/空画布作底图）
+            self.op_label.setText("已粘贴剪贴板图片为新图层")
+        else:
+            self.op_label.setText("粘贴失败：图片无法解码")
+
+    def _render_layer_image(self, layer):
+        """把一个图层（含矢量层）隔离渲染成 QImage（透明底）：临时隐藏其它层 → scene.render 本层包围盒。"""
+        items = list(layer.get("items") or [])
+        if not items and layer.get("item") is not None:
+            items = [layer["item"]]
+        if not items:
+            return None
+        rect = QtCore.QRectF()
+        for it in items:
+            rect = rect.united(it.sceneBoundingRect())
+        if rect.width() < 1 or rect.height() < 1:
+            return None
+        hidden = []
+        for l in self.layers:  # 隔离：临时藏掉其它层，只渲染本层
+            if l is layer:
+                continue
+            sibs = list(l.get("items") or [])
+            if l.get("item") is not None:
+                sibs.append(l["item"])
+            for it in sibs:
+                if it.isVisible():
+                    it.setVisible(False); hidden.append(it)
+        try:
+            img = QtGui.QImage(int(rect.width()) + 1, int(rect.height()) + 1,
+                               QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+            img.fill(QtCore.Qt.GlobalColor.transparent)
+            p = QtGui.QPainter(img)
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            self.scene.render(p, QtCore.QRectF(0, 0, img.width(), img.height()), rect)
+            p.end()
+        finally:
+            for it in hidden:
+                it.setVisible(True)
+        return img
 
     def _ai_place_b64(self, b64: str, push: bool = True):
         """AI 结果 base64 落到画布：无图层→作底图；已有内容→作可移动图层(≤55%居中)。返回 layer 或 None。

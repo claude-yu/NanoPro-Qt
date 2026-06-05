@@ -234,6 +234,12 @@ class ChatPanel(QtWidgets.QWidget):
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal if pw else QtWidgets.QLineEdit.EchoMode.Password)
         self.key_eye.setText("🙈" if pw else "👁")
 
+    def _prefill_key(self):
+        """把当前商家已存的 Key 回填进框（密码打码，点眼睛才显）——保存后/切商家后都看得出已存、平常不露明文。"""
+        self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.key_eye.setText("👁")
+        self.key_input.setText(config.read_chat_key(self._cur_pid()) or "")
+
     @staticmethod
     def _pid_for_base(bu: str) -> str:
         """按地址推断商家 id（save/load/切商家共用同一口径，避免桶键不一致丢模型列表，审核 MEDIUM）。"""
@@ -295,7 +301,7 @@ class ChatPanel(QtWidgets.QWidget):
                     self.base_url.clear()
                     self._set_model("")
             self._fill_models(config.get_chat_models(pid), keep_current=True)
-        self.key_input.clear()  # 不在 UI 留明文；key 状态由 _set_key_stat 表明（发送时按商家读各自的 key）
+        self._prefill_key()  # 回填该商家已存 Key（密码打码，点眼睛才显），不再清空
         self._set_key_stat(conn.get("has_key", False), conn.get("key_hint", ""))
         self._refresh_toggle_label()
 
@@ -385,7 +391,7 @@ class ChatPanel(QtWidgets.QWidget):
             r = config.set_chat_conn(pid, self.base_url.text().strip(), self.key_input.text(), model)
         except Exception as e:
             self._set_status("保存失败：%s" % e, True); return
-        self.key_input.clear()  # 不在 UI 留明文
+        self._prefill_key()  # 保存后回填（密码打码），让用户看出已存、平常不露明文
         # 记住当前模型（含手填自定义）：并进该商家桶最前（与 conn 同键 pid，统一口径）。
         if model:
             try:

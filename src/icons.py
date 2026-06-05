@@ -192,6 +192,19 @@ def tool_icon(name: str, color: str = "#cdd2db", size: int = 22) -> QtGui.QIcon:
         pt.drawRect(QtCore.QRectF(s * 0.18, s * 0.22, s * 0.64, s * 0.56))
         pt.setBrush(QtGui.QColor(color))
         pt.drawEllipse(QtCore.QPointF(c, c), s * 0.15, s * 0.15)
+    elif name == "sh_rect":  # 形状-矩形
+        pt.drawRect(QtCore.QRectF(s * 0.20, s * 0.28, s * 0.60, s * 0.44))
+    elif name == "sh_ellipse":  # 形状-椭圆
+        pt.drawEllipse(QtCore.QPointF(c, c), s * 0.30, s * 0.22)
+    elif name == "sh_line":  # 形状-直线
+        _line(pt, s * 0.22, s * 0.78, s * 0.78, s * 0.22)
+    elif name == "sh_arrow":  # 形状-箭头：斜线 + 实心箭头三角形
+        _line(pt, s * 0.20, s * 0.80, s * 0.76, s * 0.24)
+        pt.setBrush(QtGui.QColor(color))
+        path = QtGui.QPainterPath()
+        path.moveTo(s * 0.80, s * 0.18); path.lineTo(s * 0.56, s * 0.30); path.lineTo(s * 0.70, s * 0.44)
+        path.closeSubpath()
+        pt.drawPath(path)
     elif name == "hand":
         for fx, top in ((0.36, 0.30), (0.50, 0.22), (0.64, 0.24), (0.76, 0.32)):  # 四指
             _line(pt, s * fx, s * top, s * fx, s * 0.60)

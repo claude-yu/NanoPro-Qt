@@ -535,6 +535,12 @@ class AiPanel(QtWidgets.QWidget):
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal if pw else QtWidgets.QLineEdit.EchoMode.Password)
         self.key_eye.setText("🙈" if pw else "👁")
 
+    def _prefill_key(self):
+        """把当前中转站已存的 Key 回填进框（密码打码，点眼睛才显）——保存后/切站后都看得出已存、平常不露明文。"""
+        self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.key_eye.setText("👁")
+        self.key_input.setText(config.read_key(self._cur_pid()) or "")
+
     def _cur_pid(self):
         return self.provider_combo.currentData()
 
@@ -582,7 +588,7 @@ class AiPanel(QtWidgets.QWidget):
                     break
             self.base_url.setText(default_base)  # grsai 站填默认地址；自定义中转留空让用户填
             self._fill_models(config.get_gen_models(pid), keep_current=True)
-        self.key_input.clear()
+        self._prefill_key()  # 回填已存 Key（密码打码，点眼睛才显），不再清空
         self._set_key_stat(conn.get("has_key", False), conn.get("key_hint", ""))
         self._sync_by_model()
         if hasattr(self, "settings_toggle"):
@@ -779,7 +785,7 @@ class AiPanel(QtWidgets.QWidget):
             r = config.set_connection(pid, self.base_url.text().strip(), self.key_input.text(), model, self._cur_fmt())
         except Exception as e:
             self._set_status("保存失败：%s" % e, True); return
-        self.key_input.clear()  # 不在 UI 留明文
+        self._prefill_key()  # 保存后回填（密码打码），让用户看出已存、平常不露明文
         if model:  # 记住该站当前模型（含手填）
             try:
                 config.set_gen_models(pid, [model] + config.get_gen_models(pid))

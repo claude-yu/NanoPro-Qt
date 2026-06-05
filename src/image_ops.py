@@ -28,9 +28,11 @@ def magic_wand_mask(rgba: np.ndarray, x: int, y: int, tol: int) -> np.ndarray:
     return (labels == comp).astype(np.uint8) * 255
 
 
-def grabcut_mask(rgba: np.ndarray, seed_mask=None, rect=None, iters: int = 5):
+def grabcut_mask(rgba: np.ndarray, seed_mask=None, rect=None, iters: int = 5, progress_cb=None):
     """GrabCut 前景分割（对非纯色背景抠主体）。
     seed_mask: (H,W) uint8 选区(>0=确定/可能前景) 优先；否则用 rect=(x0,y0,x1,y1) 矩形框。
+    progress_cb(done, total)->bool|None：传了则【逐次迭代】并回调进度（返回 False 可提前停，用于进度条+取消）；
+    None=一次性算完（保持原行为，供无需进度的调用方）。
     返回 (fg_mask uint8 255/0, err_str)；失败返回 (None, '原因') —— 大声失败，不静默。"""
     if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 3:
         return None, "图像格式无效（需 HxWx≥3 通道）"
@@ -47,7 +49,7 @@ def grabcut_mask(rgba: np.ndarray, seed_mask=None, rect=None, iters: int = 5):
             # 沿用现有选区语义：选区内 = 可能前景，其余 = 可能背景（不标确定边，简洁优先）
             gc_mask[:] = cv2.GC_PR_BGD
             gc_mask[np.asarray(seed_mask) > 0] = cv2.GC_PR_FGD
-            cv2.grabCut(bgr, gc_mask, None, bgd_model, fgd_model, iters, cv2.GC_INIT_WITH_MASK)
+            init_mode, rect_arg = cv2.GC_INIT_WITH_MASK, None
         else:
             x0, y0, x1, y1 = rect
             x0, x1 = sorted((int(x0), int(x1)))
@@ -55,7 +57,17 @@ def grabcut_mask(rgba: np.ndarray, seed_mask=None, rect=None, iters: int = 5):
             x0 = max(0, x0); y0 = max(0, y0); x1 = min(w, x1); y1 = min(h, y1)
             if x1 <= x0 or y1 <= y0:
                 return None, "框选区域无效"
-            cv2.grabCut(bgr, gc_mask, (x0, y0, x1 - x0, y1 - y0), bgd_model, fgd_model, iters, cv2.GC_INIT_WITH_RECT)
+            init_mode, rect_arg = cv2.GC_INIT_WITH_RECT, (x0, y0, x1 - x0, y1 - y0)
+        n = max(1, int(iters))
+        if progress_cb is None:
+            cv2.grabCut(bgr, gc_mask, rect_arg, bgd_model, fgd_model, n, init_mode)
+        else:
+            # 逐次迭代，每步回调进度（首次 init，之后 GC_EVAL 续算）；cb 返回 False 提前停（取消）
+            for i in range(n):
+                cv2.grabCut(bgr, gc_mask, (rect_arg if i == 0 else None),
+                            bgd_model, fgd_model, 1, (init_mode if i == 0 else cv2.GC_EVAL))
+                if progress_cb(i + 1, n) is False:
+                    break
     except cv2.error as e:
         return None, f"GrabCut 失败: {e}"
     fg = (((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD)).astype(np.uint8)) * 255

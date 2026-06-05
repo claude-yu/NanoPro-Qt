@@ -41,7 +41,8 @@ class CanvasView(QtWidgets.QGraphicsView):
     nodeDoubleClick = QtCore.Signal(QtCore.QPointF)
 
     # 走 paintPress/Move/Release 的工具：选区(brush/wand/lasso/rect/rectsel) + 拖框(erase/crop) + 像素(draw/eraser)
-    _PAINT_TOOLS = ("brush", "draw", "eraser", "wand", "lasso", "rect", "rectsel", "erase", "crop")
+    _PAINT_TOOLS = ("brush", "draw", "eraser", "wand", "lasso", "rect", "rectsel", "erase", "crop",
+                    "sh_rect", "sh_ellipse", "sh_line", "sh_arrow")  # 形状工具走拖框 press/move/release
 
     def __init__(self, scene: QtWidgets.QGraphicsScene, parent=None):
         super().__init__(scene, parent)
@@ -137,6 +138,29 @@ class CanvasView(QtWidgets.QGraphicsView):
         sr = self.sceneRect()
         if sr.isValid() and sr.width() > 0:
             painter.fillRect(sr.intersected(rect), self._checker)  # 画布内：棋盘格=透明
+            if getattr(self, "_grid_on", False):
+                self._draw_grid(painter, sr, rect)
+
+    def _draw_grid(self, painter: QtGui.QPainter, sr: QtCore.QRectF, rect: QtCore.QRectF):
+        import math
+        g = max(4, int(getattr(self, "_grid_size", 20)))
+        area = sr.intersected(rect)
+        if area.isEmpty():
+            return
+        pen = QtGui.QPen(QtGui.QColor(120, 120, 140, 70)); pen.setCosmetic(True); pen.setWidth(0)
+        painter.setPen(pen)
+        x = math.floor(area.left() / g) * g
+        while x <= area.right():
+            painter.drawLine(QtCore.QLineF(x, area.top(), x, area.bottom())); x += g
+        y = math.floor(area.top() / g) * g
+        while y <= area.bottom():
+            painter.drawLine(QtCore.QLineF(area.left(), y, area.right(), y)); y += g
+
+    def set_grid(self, on: bool):
+        self._grid_on = bool(on); self.viewport().update()
+
+    def set_grid_size(self, px: int):
+        self._grid_size = max(4, int(px)); self.viewport().update()
 
     # —— 参考线（从标尺拖入）：列表存 scene 坐标，drawForeground 直接画 scene 线 ——
     def add_guide(self, orient: str, scene_pos: float):
@@ -314,6 +338,18 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.extractRequested.emit(); return  # Enter 抠出选区
         if (mods & QtCore.Qt.KeyboardModifier.ControlModifier) and e.key() == QtCore.Qt.Key.Key_J:
             self.layerViaCopy.emit(); return  # Ctrl+J PS 图层 via copy（选区→复制到新层 / 无选区→复制当前层）
+        # Ctrl+C/Ctrl+V 复制粘贴图层；就地编辑文字时让位给文本默认复制粘贴（不抢占）
+        ed = getattr(self, "_editor", None)
+        sc = self.scene()
+        fi = sc.focusItem() if sc is not None else None
+        editing_text = (isinstance(fi, QtWidgets.QGraphicsTextItem)
+                        and bool(fi.textInteractionFlags()
+                                 & QtCore.Qt.TextInteractionFlag.TextEditorInteraction))
+        if ed is not None and not editing_text:
+            if e.matches(QtGui.QKeySequence.StandardKey.Copy):
+                ed.copy_to_clipboard(); e.accept(); return
+            if e.matches(QtGui.QKeySequence.StandardKey.Paste):
+                ed.paste_from_clipboard(); e.accept(); return
         if self._tool == "move":  # 方向键微移当前层（Shift = 10px，PS 行为）
             step = 10 if (e.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier) else 1
             d = {QtCore.Qt.Key.Key_Left: (-step, 0), QtCore.Qt.Key.Key_Right: (step, 0),
@@ -336,7 +372,30 @@ class CanvasView(QtWidgets.QGraphicsView):
         if self._tool == "zoom":
             self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
             self._apply_zoom(1.0 / 1.25)
-        e.accept()  # 一律吞掉：画布上不弹主窗口的工具栏/停靠切换菜单
+            e.accept()
+            return
+        ed = getattr(self, "_editor", None)
+        if ed is None:
+            e.accept(); return
+        # 画布右键菜单：复制 / 粘贴 / 删除（不弹主窗口的工具栏/停靠切换菜单）
+        m = QtWidgets.QMenu(self)
+        has_layer = getattr(ed, "active", None) is not None
+        has_clip = not QtWidgets.QApplication.clipboard().image().isNull()
+        a_copy = m.addAction("复制图层"); a_copy.setEnabled(has_layer)
+        a_copy.triggered.connect(ed.copy_to_clipboard)
+        a_paste = m.addAction("粘贴"); a_paste.setEnabled(has_clip)
+        a_paste.triggered.connect(ed.paste_from_clipboard)
+        m.addSeparator()
+        tm = m.addMenu("翻转 / 旋转")  # 作用于选中矢量元素或活动层
+        tm.addAction("水平翻转").triggered.connect(lambda: ed._flip_objects(True))
+        tm.addAction("垂直翻转").triggered.connect(lambda: ed._flip_objects(False))
+        tm.addAction("顺时针 90°").triggered.connect(lambda: ed._rotate_objects(90))
+        tm.addAction("逆时针 90°").triggered.connect(lambda: ed._rotate_objects(270))
+        m.addSeparator()
+        a_del = m.addAction("删除图层"); a_del.setEnabled(has_layer)
+        a_del.triggered.connect(ed._delete_active)
+        m.exec(e.globalPos())
+        e.accept()
 
     def _ring_rect(self, vp_pt):
         # 画笔光圈的视口包围矩形（含 padding），供局部重绘。

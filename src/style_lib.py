@@ -71,18 +71,29 @@ def build_manifest(lib_dir):
     if not d.is_dir():
         return 0, 0, "目录不存在：%s" % lib_dir
     themes = []
-    top = [p.name for p in sorted(d.iterdir(), key=lambda x: x.name.lower())
-           if p.is_file() and p.suffix.lower() in IMG_EXTS]
+    try:
+        entries = sorted(d.iterdir(), key=lambda x: x.name.lower())
+    except Exception as e:
+        return 0, 0, "读取目录失败：%s" % e
+    top = [p.name for p in entries if p.is_file() and p.suffix.lower() in IMG_EXTS]
     if top:
         themes.append({"name": "未分类", "keywords": "",
                        "figures": [{"file": f, "caption": Path(f).stem} for f in top]})
-    for sub in sorted(d.iterdir(), key=lambda x: x.name.lower()):
-        if sub.is_dir():
-            figs = [{"file": str(p.relative_to(d)).replace("\\", "/"), "caption": p.stem}
-                    for p in sorted(sub.rglob("*"), key=lambda x: str(x).lower())
-                    if p.is_file() and p.suffix.lower() in IMG_EXTS]  # 递归收深层图，相对路径(跨平台用 /)
-            if figs:
-                themes.append({"name": sub.name, "keywords": "", "figures": figs})
+    for sub in entries:
+        if not sub.is_dir():
+            continue
+        figs = []
+        try:  # 某子目录/深层不可读 → 跳过该分类，不让整体生成失败（之前会抛异常被吞→"没反应"）
+            for p in sorted(sub.rglob("*"), key=lambda x: str(x).lower()):
+                try:
+                    if p.is_file() and p.suffix.lower() in IMG_EXTS:
+                        figs.append({"file": str(p.relative_to(d)).replace("\\", "/"), "caption": p.stem})
+                except Exception:
+                    continue
+        except Exception:
+            continue
+        if figs:
+            themes.append({"name": sub.name, "keywords": "", "figures": figs})
     nf = sum(len(t["figures"]) for t in themes)
     if not themes:
         return 0, 0, "该目录及其子文件夹下没有图片"
