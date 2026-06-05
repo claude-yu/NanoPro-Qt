@@ -301,6 +301,63 @@ class AssetsMixin:
         else:
             QtWidgets.QMessageBox.information(self, "拆分合集", msg)
 
+    def _trim_asset_folder(self):
+        """把【当前分类】的素材批量裁掉四周透明留白 → 输出到新文件夹（非破坏，不动原图）。
+        能裁的存紧致 PNG；无透明边/无 alpha 的原样复制 → 输出文件夹=一套裁紧的库。大声失败：报计数。"""
+        import os, shutil
+        items = list(self._asset_cur_items or []) or list(self._asset_all_items or [])
+        if not items:
+            QtWidgets.QMessageBox.information(self, "批量裁透明边", "当前分类没有素材。先在分类树里点一个分类（别点整库根，太大）。")
+            return
+        if len(items) > 3000 and QtWidgets.QMessageBox.question(
+                self, "批量裁透明边",
+                "当前视图有 %d 张，批量处理会较久且占磁盘。建议先点一个【子分类】缩小范围。\n仍要继续吗？" % len(items),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择裁剪结果的输出文件夹（非破坏，不改原图）")
+        if not out:
+            return
+        prog = QtWidgets.QProgressDialog("正在批量裁透明边…", "取消", 0, len(items), self)
+        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal); prog.setMinimumDuration(0)
+        trimmed = same = failed = 0
+        for k, it in enumerate(items):
+            if prog.wasCanceled():
+                break
+            prog.setValue(k); QtWidgets.QApplication.processEvents()
+            path = it.get("path")
+            qi = QtGui.QImage(path) if path else QtGui.QImage()
+            if qi.isNull():
+                failed += 1; continue
+            stem = os.path.splitext(os.path.basename(path))[0]
+            qa = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+            try:
+                bb = image_ops.content_bbox(image_ops.qimage_to_rgba(qa))
+            except Exception:
+                bb = None
+            if bb is None or (bb[0] == 0 and bb[1] == 0 and bb[2] == qi.width() and bb[3] == qi.height()):
+                try:  # 无透明边/无 alpha → 原样复制（保格式不膨胀），让输出文件夹是【完整】一套库
+                    shutil.copy2(path, os.path.join(out, os.path.basename(path)))
+                    same += 1
+                except Exception:
+                    failed += 1
+                continue
+            x0, y0, x1, y1 = bb
+            if qa.copy(x0, y0, x1 - x0, y1 - y0).save(os.path.join(out, stem + ".png"), "PNG"):
+                trimmed += 1
+            else:
+                failed += 1
+        prog.setValue(len(items))
+        msg = ("批量裁透明边完成：\n  裁紧 %d 张（透明边已去）\n  无需裁/无透明边 %d 张（原样复制）\n  失败 %d\n  输出：%s"
+               % (trimmed, same, failed, out))
+        if (trimmed + same) and QtWidgets.QMessageBox.question(
+                self, "批量裁透明边", msg + "\n\n是否连接这个文件夹作为素材库（即用裁紧后的素材）？",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                ) == QtWidgets.QMessageBox.StandardButton.Yes:
+            config.set_asset_dir(out); self._load_asset_dir()
+        else:
+            QtWidgets.QMessageBox.information(self, "批量裁透明边", msg)
+
     def _build_asset_manifest(self):
         """给当前素材根目录一键生成 manifest.json（按子文件夹分类，递归收深层图），再重扫刷新。"""
         root = config.get_asset_dir()

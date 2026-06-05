@@ -1538,6 +1538,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         _gmenu.addAction("⬇ 按分类导出…", self._export_assets_by_category)
         _gmenu.addSeparator()
         _gmenu.addAction("✂ 拆分合集为单个图标…", self._split_montage_assets)
+        _gmenu.addAction("✂ 批量裁透明边（当前分类）…", self._trim_asset_folder)
         _gear.setMenu(_gmenu)
         _srow.addWidget(_gear)
         _pl.addLayout(_srow)
