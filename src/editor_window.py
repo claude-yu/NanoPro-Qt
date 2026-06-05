@@ -5194,7 +5194,42 @@ class EditorWindow(QtWidgets.QMainWindow):
         if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
             self.scene.removeItem(c); self.connectors.remove(c)
             self.op_label.setText("连接线建立失败（拿不到对象外框）"); return
-        self.op_label.setText("✓ 已连接两个对象 · 移动/缩放任一对象，连线两端自动跟随")
+        self.op_label.setText("✓ 已连接两个对象 · 移动/缩放自动跟随 · 右键连线改形状(直线/曲线/折线)/颜色/删除")
+
+    def _connector_menu_at(self, scene_pos: QtCore.QPointF, global_pos) -> bool:
+        """右键命中某连接线（带容差）→ 弹形状/颜色/虚线/删除菜单；命中返回 True。"""
+        if not getattr(self, "connectors", None):
+            return False
+        tol = 7.0 / max(1e-6, self.view.current_zoom())  # 屏幕约 7px 容差，细线也好点中
+        rect = QtCore.QRectF(scene_pos.x() - tol, scene_pos.y() - tol, 2 * tol, 2 * tol)
+        hit = next((it for it in self.scene.items(rect) if it in self.connectors), None)
+        if hit is None:
+            return False
+        m = QtWidgets.QMenu(self)
+        sm = m.addMenu("连线形状")
+        for label, s in (("直线", "straight"), ("曲线（推荐）", "curved"), ("折线", "elbow")):
+            a = sm.addAction(("● " if hit.line_shape == s else "○ ") + label)
+            a.triggered.connect(lambda _=False, ss=s, cc=hit: (cc.set_shape(ss),
+                                self.op_label.setText("连线形状已改")))
+        m.addAction("改连线颜色…", lambda cc=hit: self._connector_pick_color(cc))
+        da = m.addAction("虚线"); da.setCheckable(True); da.setChecked(hit.dashed)
+        da.toggled.connect(lambda v, cc=hit: cc.set_dashed(v))
+        m.addSeparator()
+        m.addAction("✕ 删除连接线", lambda cc=hit: self._remove_connector(cc))
+        m.exec(global_pos)
+        return True
+
+    def _connector_pick_color(self, c):
+        col = QtWidgets.QColorDialog.getColor(c.color, self, "连线颜色")
+        if col.isValid():
+            c.set_color(col)
+
+    def _remove_connector(self, c):
+        if c in self.connectors:
+            if c.scene() is not None:
+                self.scene.removeItem(c)
+            self.connectors.remove(c)
+            self.op_label.setText("已删除连接线（剩 %d 条）" % len(self.connectors))
 
     # ----- 矢量内部编辑结果上浮（B3 起已入历史，纯 op_label，无「不可撤销」提示）-----
     def _note_vec_edit(self, msg: str):

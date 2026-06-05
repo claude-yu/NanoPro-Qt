@@ -1,6 +1,7 @@
 """智能连接线（BioRender 式）：两端绑定到图层(uid)，端点贴各自外框边缘，终点画箭头；
 绑定的对象移动/缩放时由 editor._refresh_connectors() 调 update_path 自动跟随。
 
+形状可切换：直线 straight / 曲线 curved（BioRender 推荐）/ 折线 elbow。可设虚线、颜色、线宽。
 几何函数纯 Qt 无副作用、可 headless 单测（edge_point / build_connector_path）。
 箭头几何照搬形状工具(_shape_path 的 sh_arrow)，保持全软件箭头观感一致。
 """
@@ -27,46 +28,99 @@ def edge_point(rect: QtCore.QRectF, toward: QtCore.QPointF) -> QtCore.QPointF:
     return QtCore.QPointF(c.x() + dx * s, c.y() + dy * s)
 
 
-def build_connector_path(p1: QtCore.QPointF, p2: QtCore.QPointF, arrow: float = 13.0) -> QtGui.QPainterPath:
-    """直线 p1→p2 + p2 端实心箭头三角形，烘焙进一条 QPainterPath（scene 坐标）。"""
-    qp = QtGui.QPainterPath()
-    qp.moveTo(p1)
-    qp.lineTo(p2)
-    line = QtCore.QLineF(p2, p1)  # 尖端→尾（与 _shape_path sh_arrow 同方向约定）
+def _arrow_head(qp: QtGui.QPainterPath, tip: QtCore.QPointF, tail: QtCore.QPointF, size: float = 13.0):
+    """在 tip 处画指向 tip→远离 tail 的实心箭头三角形（几何同形状工具 sh_arrow）。"""
+    line = QtCore.QLineF(tip, tail)
     L = line.length()
-    if L >= 1.0:
-        ang = math.acos(max(-1.0, min(1.0, line.dx() / L)))
-        if line.dy() >= 0:
-            ang = (math.pi * 2.0) - ang
-        size = max(8.0, min(20.0, arrow))
-        a1 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi / 3.0) * size,
-                                        math.cos(ang + math.pi / 3.0) * size)
-        a2 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi - math.pi / 3.0) * size,
-                                        math.cos(ang + math.pi - math.pi / 3.0) * size)
-        qp.moveTo(p2)
-        qp.lineTo(a1)
-        qp.lineTo(a2)
-        qp.closeSubpath()
+    if L < 1.0:
+        return
+    ang = math.acos(max(-1.0, min(1.0, line.dx() / L)))
+    if line.dy() >= 0:
+        ang = (math.pi * 2.0) - ang
+    s = max(8.0, min(20.0, size))
+    a1 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi / 3.0) * s, math.cos(ang + math.pi / 3.0) * s)
+    a2 = line.p1() + QtCore.QPointF(math.sin(ang + math.pi - math.pi / 3.0) * s, math.cos(ang + math.pi - math.pi / 3.0) * s)
+    qp.moveTo(tip)
+    qp.lineTo(a1)
+    qp.lineTo(a2)
+    qp.closeSubpath()
+
+
+def _elbow_knee(p1: QtCore.QPointF, p2: QtCore.QPointF) -> QtCore.QPointF:
+    """折线拐点：水平跨度大 → 先水平后垂直；否则先垂直后水平（直角连线，像流程图）。"""
+    if abs(p2.x() - p1.x()) >= abs(p2.y() - p1.y()):
+        return QtCore.QPointF(p2.x(), p1.y())
+    return QtCore.QPointF(p1.x(), p2.y())
+
+
+def build_connector_path(p1: QtCore.QPointF, p2: QtCore.QPointF,
+                         shape: str = "straight", arrow: float = 13.0) -> QtGui.QPainterPath:
+    """按形状构造 p1→p2 连线 + p2 端实心箭头，烘焙进一条 QPainterPath（scene 坐标）。
+    shape: straight 直线 / curved 平滑曲线（中点法向外凸）/ elbow 直角折线。箭头沿末端切线。"""
+    qp = QtGui.QPainterPath()
+    if shape == "curved":
+        mid = QtCore.QPointF((p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0)
+        dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+        L = math.hypot(dx, dy)
+        if L >= 1.0:
+            nx, ny = -dy / L, dx / L                 # 法向单位向量
+            off = min(70.0, L * 0.22)                # 外凸量随距离，封顶
+            ctrl = QtCore.QPointF(mid.x() + nx * off, mid.y() + ny * off)
+        else:
+            ctrl = mid
+        qp.moveTo(p1)
+        qp.quadTo(ctrl, p2)
+        _arrow_head(qp, p2, ctrl, arrow)             # 箭头沿曲线末端切线（指向 ctrl）
+    elif shape == "elbow":
+        knee = _elbow_knee(p1, p2)
+        qp.moveTo(p1)
+        qp.lineTo(knee)
+        qp.lineTo(p2)
+        _arrow_head(qp, p2, knee, arrow)             # 箭头沿最后一段方向
+    else:  # straight
+        qp.moveTo(p1)
+        qp.lineTo(p2)
+        _arrow_head(qp, p2, p1, arrow)
     return qp
 
 
 class ConnectorItem(QtWidgets.QGraphicsPathItem):
-    """连接线图元：存两端图层 uid + 样式；update_path() 按两对象当前外框重算并自动跟随。"""
+    """连接线图元：存两端图层 uid + 形状/颜色/虚线/线宽；update_path() 按两对象当前外框重算并跟随。"""
 
-    def __init__(self, editor, src_uid, dst_uid, color: str = "#333333", width: float = 2.0):
+    def __init__(self, editor, src_uid, dst_uid, color="#333333", width: float = 2.0, shape: str = "straight"):
         super().__init__()
         self._editor = editor
         self.src_uid = src_uid
         self.dst_uid = dst_uid
         self.kind = "connector"
-        col = QtGui.QColor(color)
-        pen = QtGui.QPen(col, width)
-        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
-        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
-        self.setPen(pen)
-        self.setBrush(QtGui.QBrush(col))            # 箭头三角形实心填充
+        self.line_shape = shape   # 注意：不能叫 self.shape——会覆盖 QGraphicsItem.shape() 碰撞检测方法
+        self.dashed = False
+        self.width = width
+        self.color = QtGui.QColor(color)
         self.setZValue(5_000_000.0)                  # 浮在对象之上，箭头可见
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self._apply_pen()
+
+    def _apply_pen(self):
+        pen = QtGui.QPen(self.color, self.width)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        if self.dashed:
+            pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+        self.setPen(pen)
+        self.setBrush(QtGui.QBrush(self.color))      # 箭头三角形实心填充
+
+    def set_shape(self, shape: str):
+        self.line_shape = shape
+        self.update_path()
+
+    def set_color(self, color):
+        self.color = QtGui.QColor(color)
+        self._apply_pen()
+
+    def set_dashed(self, on: bool):
+        self.dashed = bool(on)
+        self._apply_pen()
 
     def update_path(self) -> bool:
         """按两端对象当前外框重算路径。端点对象已不存在 → 返回 False（调用方删除本连接线）。"""
@@ -76,5 +130,5 @@ class ConnectorItem(QtWidgets.QGraphicsPathItem):
             return False
         p1 = edge_point(ra, rb.center())
         p2 = edge_point(rb, ra.center())
-        self.setPath(build_connector_path(p1, p2))
+        self.setPath(build_connector_path(p1, p2, self.line_shape))
         return True

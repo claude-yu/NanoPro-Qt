@@ -378,6 +378,9 @@ class CanvasView(QtWidgets.QGraphicsView):
         ed = getattr(self, "_editor", None)
         if ed is None:
             e.accept(); return
+        # 右键命中连接线 → 弹连接线菜单（形状/颜色/虚线/删除），不弹画布菜单
+        if hasattr(ed, "_connector_menu_at") and ed._connector_menu_at(self.mapToScene(e.pos()), e.globalPos()):
+            e.accept(); return
         # 画布右键菜单：复制 / 粘贴 / 删除（不弹主窗口的工具栏/停靠切换菜单）
         m = QtWidgets.QMenu(self)
         has_layer = getattr(ed, "active", None) is not None
