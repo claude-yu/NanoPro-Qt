@@ -452,6 +452,8 @@ class LayersMixin:
                 lyr["item"].setZValue(i)
         self._set_active(self.layers[-1] if self.layers else None)
         self._refresh_connectors()  # 删的对象若是连接线端点 → 该连接线随之移除（不留悬空线）
+        if hasattr(self, "_clear_connector_hover"):
+            self._clear_connector_hover()  # 悬停对象被删 → 清掉其边中点锚点，不在原位留过期蓝点
         self.op_label.setText(f"删除图层 · 剩 {len(self.layers)} 层")
 
     def _mask_from_selection(self, layer=None):

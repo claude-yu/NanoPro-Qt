@@ -131,6 +131,7 @@ class ConnectorsMixin:
         p0 = getattr(self, "_conn_p0", None)
         self._conn_p0 = None
         self._remove_preview()
+        self._clear_connector_hover()  # 一次手势结束：统一清悬停锚点（成功/失败各路径都覆盖），下次移动再按光标重算
         if p0 is None:
             return
         src = getattr(self, "_conn_src", None)
@@ -148,7 +149,6 @@ class ConnectorsMixin:
         if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
             self.scene.removeItem(c); self.connectors.remove(c)
             self.op_label.setText("连接线建立失败（拿不到对象外框）"); return
-        self._clear_connector_hover()
         self.op_label.setText("✓ 已连接两个对象（连在边中心）· 移动/缩放自动跟随 · 右键连线改形状/颜色/删除")
 
     def _connector_menu_at(self, scene_pos: QtCore.QPointF, global_pos) -> bool:
