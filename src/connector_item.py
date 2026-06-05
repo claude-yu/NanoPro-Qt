@@ -28,6 +28,24 @@ def edge_point(rect: QtCore.QRectF, toward: QtCore.QPointF) -> QtCore.QPointF:
     return QtCore.QPointF(c.x() + dx * s, c.y() + dy * s)
 
 
+def edge_anchor(rect: QtCore.QRectF, toward: QtCore.QPointF) -> QtCore.QPointF:
+    """选 rect 的【边中点】(上/下/左/右 四个中点)里【朝向 toward 的那个】→ 连线落在边的正中
+    （对齐 BioRender：连到框边的中心，而非随意的交点）。横向跨度大走左右中点，否则走上下中点。"""
+    c = rect.center()
+    dx = toward.x() - c.x()
+    dy = toward.y() - c.y()
+    if abs(dx) >= abs(dy):
+        return QtCore.QPointF(rect.right() if dx >= 0 else rect.left(), c.y())  # 右/左 边中点
+    return QtCore.QPointF(c.x(), rect.bottom() if dy >= 0 else rect.top())       # 下/上 边中点
+
+
+def anchor_points(rect: QtCore.QRectF):
+    """框的 4 个【边中点】(上/右/下/左)——悬停时画成蓝点，让用户看到能连到哪（BioRender 式锚点）。"""
+    c = rect.center()
+    return [QtCore.QPointF(c.x(), rect.top()), QtCore.QPointF(rect.right(), c.y()),
+            QtCore.QPointF(c.x(), rect.bottom()), QtCore.QPointF(rect.left(), c.y())]
+
+
 def _arrow_head(qp: QtGui.QPainterPath, tip: QtCore.QPointF, tail: QtCore.QPointF, size: float = 13.0):
     """在 tip 处画指向 tip→远离 tail 的实心箭头三角形（几何同形状工具 sh_arrow）。"""
     line = QtCore.QLineF(tip, tail)
@@ -128,7 +146,7 @@ class ConnectorItem(QtWidgets.QGraphicsPathItem):
         rb = self._editor._connector_rect(self.dst_uid)
         if ra is None or rb is None:
             return False
-        p1 = edge_point(ra, rb.center())
-        p2 = edge_point(rb, ra.center())
+        p1 = edge_anchor(ra, rb.center())  # 落在 A 朝向 B 的那条边的【正中】
+        p2 = edge_anchor(rb, ra.center())  # 落在 B 朝向 A 的那条边的【正中】
         self.setPath(build_connector_path(p1, p2, self.line_shape))
         return True

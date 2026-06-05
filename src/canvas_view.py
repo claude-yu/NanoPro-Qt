@@ -39,6 +39,7 @@ class CanvasView(QtWidgets.QGraphicsView):
     # B5 锚点：在 path 段上 Alt+单击 / 双击空段 → 加锚（场景点, Alt 是否按下）
     nodeClick = QtCore.Signal(QtCore.QPointF, bool)
     nodeDoubleClick = QtCore.Signal(QtCore.QPointF)
+    connectorHover = QtCore.Signal(QtCore.QPointF)  # 连接线工具：悬停场景点 → 显示对象边中点锚点
 
     # 走 paintPress/Move/Release 的工具：选区(brush/wand/lasso/rect/rectsel) + 拖框(erase/crop) + 像素(draw/eraser)
     _PAINT_TOOLS = ("brush", "draw", "eraser", "wand", "lasso", "rect", "rectsel", "erase", "crop",
@@ -182,8 +183,9 @@ class CanvasView(QtWidgets.QGraphicsView):
         # 常态（无任何参考线/智能吸附线/测量线）每帧只走一个分支即返回，省掉下面的 pen 构造与遍历
         _ed = getattr(self, "_editor", None)
         _ag = getattr(_ed, "_active_guides", None) if _ed is not None else None
+        _anchors = getattr(_ed, "_conn_hover_anchors", None) if _ed is not None else None
         if (not (self._guides_visible and (self._guides_v or self._guides_h))
-                and not _ag and self._measure_start is None):
+                and not _ag and self._measure_start is None and not _anchors):
             return
         if self._guides_visible:  # 用户参考线（从标尺拖出）：主题描边色细实线
             pen = QtGui.QPen(QtGui.QColor(theme.colors()["outline"]), 0)
@@ -217,6 +219,16 @@ class CanvasView(QtWidgets.QGraphicsView):
             r = 3.0 / max(self._zoom, 1e-6)  # 端点方块在屏幕上恒约 6px
             for pe in (p0, p1):
                 painter.drawRect(QtCore.QRectF(pe.x() - r, pe.y() - r, 2 * r, 2 * r))
+        # 连接线工具：悬停对象的 4 个边中点锚点（蓝点，BioRender 式 → 让用户看到能连到哪、连在边中心）
+        if self._tool == "connector" and _anchors:
+            apen = QtGui.QPen(QtGui.QColor("#1a73e8"), 0); apen.setCosmetic(True)
+            painter.setPen(apen); painter.setBrush(QtGui.QColor(255, 255, 255))
+            ar = 5.0 / max(self._zoom, 1e-6)  # 锚点在屏幕上恒约 10px
+            for a in _anchors:
+                painter.drawEllipse(a, ar, ar)           # 白心
+                painter.setBrush(QtGui.QColor("#1a73e8"))
+                painter.drawEllipse(a, ar * 0.5, ar * 0.5)  # 蓝芯
+                painter.setBrush(QtGui.QColor(255, 255, 255))
 
     def current_zoom(self) -> float:
         return self._zoom
@@ -441,6 +453,8 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - d.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - d.y())
             return
+        if self._tool == "connector":  # 连接线工具：移动即更新悬停对象的边中点锚点(不 return,拖动还要走 paintMove 画预览)
+            self.connectorHover.emit(self.mapToScene(e.position().toPoint()))
         if self._tool == "pen":
             sp = self.mapToScene(e.position().toPoint())
             if e.buttons() & QtCore.Qt.MouseButton.LeftButton:

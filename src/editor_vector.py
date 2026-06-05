@@ -1306,13 +1306,14 @@ class VectorMixin:
             self.scene.removeItem(st["rubber"])
         self._pen_state = None
 
-    def _register_vec_path(self, ve, hist_label: str, name_fn):
+    def _register_vec_path(self, ve, hist_label: str, name_fn, force_new: bool = False):
         """把一个 path/shape VElem 落地：当前 active 是【未锁定】矢量层→并入；否则新建 kind=vector 层。
-        钢笔 / 形状 / 箭头共用这一条注册管线（DRY）。建前 push 历史 → 撤销=移除该元素/层。返回 (item, layer)。"""
+        钢笔 / 形状 / 箭头共用这一条注册管线（DRY）。建前 push 历史 → 撤销=移除该元素/层。返回 (item, layer)。
+        force_new=True：每个【独立成层】（形状用），使每个矩形/箭头都是单独对象，可被智能连接线分别连接。"""
         from editor_window import DEFAULT_CANVAS  # 空画布初始化用，仍定义在 editor_window 模块级（避免循环依赖）
         self._push_history(hist_label)
-        target = self.active if (self.active and self.active.get("kind") == "vector"
-                                 and not self.active.get("locked")) else None
+        target = None if force_new else (self.active if (self.active and self.active.get("kind") == "vector"
+                                                         and not self.active.get("locked")) else None)
         it = svg_io._to_item(ve)
         if target is not None:
             it.setZValue(max((p[0].zValue() for p in target["pairs"]), default=len(self.layers)))  # 叠该层最上
@@ -1423,7 +1424,8 @@ class VectorMixin:
         ve = svg_io.VElem(type="path", qpath=qp, fill=fill, stroke="#333333", stroke_width=2.0)
         self._register_vec_path(
             ve, f"画{nm}",
-            lambda: f"{nm} {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}")
+            lambda: f"{nm} {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}",
+            force_new=True)  # 每个形状独立成层 → 可被智能连接线分别连接（不再并进同一层）
         self.op_label.setText(f"已画{nm}（拖动可移动·右侧矢量属性改色/描边·Shift 约束方圆/角度）")
 
     # 智能连接线方法已抽到 editor_connectors.ConnectorsMixin（EditorWindow 继承之）。

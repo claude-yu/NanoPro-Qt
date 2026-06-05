@@ -74,6 +74,25 @@ class ConnectorsMixin:
                     self.scene.removeItem(c)
                 self.connectors.remove(c)
 
+    def _on_connector_hover(self, scene_pos):
+        """连接线工具悬停：命中对象 → 算它 4 个边中点锚点存 self._conn_hover_anchors（drawForeground 画蓝点）；
+        没命中 → 清空。让用户像 BioRender 一样看到能连到哪、连在边的正中。"""
+        import connector_item
+        lyr = self._layer_at_scene(scene_pos)
+        anchors = []
+        if lyr is not None:
+            r = self._connector_rect(lyr.get("uid"))
+            if r is not None:
+                anchors = connector_item.anchor_points(r)
+        if anchors != getattr(self, "_conn_hover_anchors", []):
+            self._conn_hover_anchors = anchors
+            self.view.viewport().update()
+
+    def _clear_connector_hover(self):
+        if getattr(self, "_conn_hover_anchors", None):
+            self._conn_hover_anchors = []
+            self.view.viewport().update()
+
     def _connector_start(self, sp: QtCore.QPointF):
         self._conn_src = self._layer_at_scene(sp)
         self._conn_p0 = sp
@@ -113,7 +132,8 @@ class ConnectorsMixin:
         if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
             self.scene.removeItem(c); self.connectors.remove(c)
             self.op_label.setText("连接线建立失败（拿不到对象外框）"); return
-        self.op_label.setText("✓ 已连接两个对象 · 移动/缩放自动跟随 · 右键连线改形状(直线/曲线/折线)/颜色/删除")
+        self._clear_connector_hover()
+        self.op_label.setText("✓ 已连接两个对象（连在边中心）· 移动/缩放自动跟随 · 右键连线改形状/颜色/删除")
 
     def _connector_menu_at(self, scene_pos: QtCore.QPointF, global_pos) -> bool:
         """右键命中某连接线（带容差）→ 弹形状/颜色/虚线/删除菜单；命中返回 True。"""

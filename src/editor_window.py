@@ -632,6 +632,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.view.penHover.connect(self._pen_hover)
         self.view.nodeClick.connect(self._node_click)
         self.view.nodeDoubleClick.connect(self._node_double_click)
+        self.view.connectorHover.connect(self._on_connector_hover)  # 连接线工具悬停 → 显示边中点锚点
         # B2：矢量元素级选择（与【层】级 self.active 解耦）→ 刷新「矢量属性」面板。QGraphicsView move 工具点选自然填 scene.selectedItems()。
         self.scene.selectionChanged.connect(self._on_vec_selection_changed)
         self.set_tool("move")
@@ -1754,6 +1755,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._clear_node_overlay()
         if prev == "pen" and tool != "pen":
             self._cancel_pen()
+        if prev == "connector" and tool != "connector":  # 离开连接线工具 → 清掉悬停锚点
+            self._clear_connector_hover()
         self.view.set_tool(tool)
         if tool == "node":
             self._enter_node_tool()  # 若已选中单个矢量 path 则立刻建 overlay
