@@ -112,6 +112,24 @@ class ConnectorsMixin:
         lyr["_cbbox"] = (key, rect)
         return rect
 
+    def _snap_to_anchor(self, scene_pos: QtCore.QPointF, tol_px: float = 12.0):
+        """箭头/直线工具：端点靠近某对象的边中点锚点(屏幕<tol_px)时吸过去；否则原样返回。
+        让基础箭头/直线也能精确连到对象边的中心（对齐 BioRender：靠近 node 就吸附）。"""
+        lyr, eidx = self._object_at_scene(scene_pos)
+        if lyr is None:
+            return scene_pos
+        r = self._connector_rect(lyr.get("uid"), eidx)
+        if r is None:
+            return scene_pos
+        import connector_item
+        tol = tol_px / max(1e-6, self.view.current_zoom())
+        best, bestd = None, tol
+        for a in connector_item.anchor_points(r):
+            d = (a - scene_pos).manhattanLength()
+            if d <= bestd:
+                bestd, best = d, a
+        return best if best is not None else scene_pos
+
     def _refresh_connectors(self):
         """重算所有连接线端点（对象移动/缩放/对齐后跟随）；端点对象没了的连接线自动移除（大声：不留悬空线）。"""
         if not getattr(self, "connectors", None):

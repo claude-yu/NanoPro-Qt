@@ -45,6 +45,8 @@ class CanvasView(QtWidgets.QGraphicsView):
     _PAINT_TOOLS = ("brush", "draw", "eraser", "wand", "lasso", "rect", "rectsel", "erase", "crop",
                     "sh_rect", "sh_ellipse", "sh_line", "sh_arrow",  # 形状工具走拖框 press/move/release
                     "connector")  # 智能连接线：从对象拖到对象（press/move/release）
+    # 悬停显示对象边中点锚点 + 端点吸附的工具：连接线 + 箭头/直线（基础箭头也能连边中心，对齐 BioRender）
+    _ANCHOR_TOOLS = ("connector", "sh_arrow", "sh_line")
 
     def __init__(self, scene: QtWidgets.QGraphicsScene, parent=None):
         super().__init__(scene, parent)
@@ -184,7 +186,7 @@ class CanvasView(QtWidgets.QGraphicsView):
         _ed = getattr(self, "_editor", None)
         _ag = getattr(_ed, "_active_guides", None) if _ed is not None else None
         _anchors = getattr(_ed, "_conn_hover_anchors", None) if _ed is not None else None
-        _draw_anchors = self._tool == "connector" and _anchors  # 仅连接线工具下画锚点
+        _draw_anchors = self._tool in self._ANCHOR_TOOLS and _anchors  # 连接线/箭头/直线工具下画锚点
         if (not (self._guides_visible and (self._guides_v or self._guides_h))
                 and not _ag and self._measure_start is None and not _draw_anchors):
             return
@@ -454,7 +456,7 @@ class CanvasView(QtWidgets.QGraphicsView):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - d.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - d.y())
             return
-        if self._tool == "connector":  # 连接线工具：移动即更新悬停对象的边中点锚点(不 return,拖动还要走 paintMove 画预览)
+        if self._tool in self._ANCHOR_TOOLS:  # 连接线/箭头/直线：移动即更新悬停对象的边中点锚点(不 return,拖动还走 paintMove 画预览)
             self.connectorHover.emit(self.mapToScene(e.position().toPoint()))
         if self._tool == "pen":
             sp = self.mapToScene(e.position().toPoint())

@@ -1399,12 +1399,16 @@ class VectorMixin:
         return qp
 
     def _shape_start(self, sp: QtCore.QPointF):
+        if self.view._tool in ("sh_arrow", "sh_line"):  # 箭头/直线起点吸附到对象边中点(基础箭头也连边中心)
+            sp = self._snap_to_anchor(sp)
         self._shape_p0 = sp; self._shape_p1 = sp
         self._start_preview()
 
     def _shape_move(self, sp: QtCore.QPointF):
         if getattr(self, "_shape_p0", None) is None or self._sel_preview is None:
             return
+        if self.view._tool in ("sh_arrow", "sh_line"):  # 箭头/直线终点吸附到对象边中点
+            sp = self._snap_to_anchor(sp)
         self._shape_p1 = sp
         constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
         self._sel_preview.setPath(self._shape_path(self.view._tool, self._shape_p0, sp, constrain))

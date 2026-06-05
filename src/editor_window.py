@@ -1755,7 +1755,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._clear_node_overlay()
         if prev == "pen" and tool != "pen":
             self._cancel_pen()
-        if prev == "connector" and tool != "connector":  # 离开连接线工具 → 清掉悬停锚点
+        _atools = getattr(CanvasView, "_ANCHOR_TOOLS", ("connector",))  # 离开 连接线/箭头/直线 → 清悬停锚点
+        if prev in _atools and tool not in _atools:
             self._clear_connector_hover()
         self.view.set_tool(tool)
         if tool == "node":
