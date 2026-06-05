@@ -42,7 +42,8 @@ class CanvasView(QtWidgets.QGraphicsView):
 
     # 走 paintPress/Move/Release 的工具：选区(brush/wand/lasso/rect/rectsel) + 拖框(erase/crop) + 像素(draw/eraser)
     _PAINT_TOOLS = ("brush", "draw", "eraser", "wand", "lasso", "rect", "rectsel", "erase", "crop",
-                    "sh_rect", "sh_ellipse", "sh_line", "sh_arrow")  # 形状工具走拖框 press/move/release
+                    "sh_rect", "sh_ellipse", "sh_line", "sh_arrow",  # 形状工具走拖框 press/move/release
+                    "connector")  # 智能连接线：从对象拖到对象（press/move/release）
 
     def __init__(self, scene: QtWidgets.QGraphicsScene, parent=None):
         super().__init__(scene, parent)

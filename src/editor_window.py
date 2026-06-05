@@ -504,6 +504,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._apply_ads_theme()
 
         self.layers: list[dict] = []
+        self.connectors: list = []     # 智能连接线（ConnectorItem，绑定两端图层 uid；对象移动自动跟随）
         self._thumb_cache: dict = {}   # uid → (image.cacheKey(), QPixmap)：图层缩略图缓存，免每次刷新都全分辨率重缩放
         self.active: dict | None = None
         self.selected_layers: list[dict] = []  # 对齐/分布的选择集；约定 active 始终在内，单选时 ==[active]
@@ -1230,6 +1231,8 @@ class EditorWindow(QtWidgets.QMainWindow):
              ("sh_ellipse", "椭圆：拖框画椭圆 / 圆（Shift = 正圆）"),
              ("sh_line", "直线：拖画直线（Shift 吸 0/45/90°）"),
              ("sh_arrow", "箭头：拖画带箭头的线（Shift 吸角度）—— 通路/流程图常用")],
+            [("connector", "智能连接线：从一个对象【拖到】另一个对象建立带箭头的连线；"
+                           "移动/缩放任一对象，连线两端自动跟随 —— 机制/通路图核心（BioRender 式）")],
             [("measure", "测量：拖画测量线，选项栏读 X/Y/W/H/角度/长度；可设比例换算真实尺寸、按角度拉直活动层"),
              ("zoom", "缩放 / 放大镜（左键放大·右键或 Alt 缩小）")],
         ]
@@ -1251,6 +1254,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             "draw": "画笔", "eraser": "橡皮擦", "text": "文字",
             "pen": "钢笔", "node": "锚点", "measure": "测量", "zoom": "缩放",
             "sh_rect": "矩形", "sh_ellipse": "椭圆", "sh_line": "直线", "sh_arrow": "箭头",
+            "connector": "连接线",
         }
 
         def make_action(tool, tip):
@@ -2375,6 +2379,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         item._move_cb = self._push_history
         item._snap_cb = self._snap_layer_pos
         item._release_cb = self._clear_guides_overlay
+        item._post_move_cb = self._refresh_connectors  # 移动/对齐/缩放后 → 绑定的连接线自动跟随
         item.setZValue(len(self.layers))
         self.scene.addItem(item)
         self._layer_uid += 1
@@ -2768,6 +2773,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         if guides != self._active_guides:
             self._active_guides = guides
             self.view.viewport().update()
+        self._refresh_connectors()  # 矢量元素拖动时连接线跟随（栅格靠 _post_move_cb）
         return QtCore.QPointF(new_pos.x() + ndx, new_pos.y() + ndy)
 
     def _snap_layer_pos(self, new_pos: QtCore.QPointF) -> QtCore.QPointF:
@@ -3420,6 +3426,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             else:
                 lyr["item"].setZValue(i)
         self._set_active(self.layers[-1] if self.layers else None)
+        self._refresh_connectors()  # 删的对象若是连接线端点 → 该连接线随之移除（不留悬空线）
         self.op_label.setText(f"删除图层 · 剩 {len(self.layers)} 层")
 
     def import_image(self):
@@ -5115,6 +5122,80 @@ class EditorWindow(QtWidgets.QMainWindow):
             lambda: f"{nm} {len([l for l in self.layers if l.get('kind') == 'vector']) + 1}")
         self.op_label.setText(f"已画{nm}（拖动可移动·右侧矢量属性改色/描边·Shift 约束方圆/角度）")
 
+    # ----- 智能连接线：从对象拖到对象建带箭头连线，移动/缩放自动跟随（BioRender 式）-----
+    def _layer_at_scene(self, pt: QtCore.QPointF):
+        """命中该 scene 点的【最上层可见图层】（用外框 bbox 命中，连接线锚到对象框）。"""
+        best = None
+        for l in self.layers:
+            it = l.get("item")
+            if it is None or it.scene() is None or not l.get("visible", True):
+                continue
+            if it.sceneBoundingRect().contains(pt):
+                if best is None or it.zValue() >= best["item"].zValue():
+                    best = l
+        return best
+
+    def _connector_rect(self, uid):
+        """连接线端点对象的当前外框（scene 坐标）；对象已删/脱离场景 → None（连接线据此自删）。"""
+        lyr = next((l for l in self.layers if l.get("uid") == uid), None)
+        if lyr is None:
+            return None
+        it = lyr.get("item")
+        if it is None or it.scene() is None:
+            return None
+        return it.sceneBoundingRect()
+
+    def _refresh_connectors(self):
+        """重算所有连接线端点（对象移动/缩放/对齐后跟随）；端点对象没了的连接线自动移除（大声：不留悬空线）。"""
+        if not getattr(self, "connectors", None):
+            return
+        for c in list(self.connectors):
+            if not c.update_path():
+                if c.scene() is not None:
+                    self.scene.removeItem(c)
+                self.connectors.remove(c)
+
+    def _connector_start(self, sp: QtCore.QPointF):
+        self._conn_src = self._layer_at_scene(sp)
+        self._conn_p0 = sp
+        self._conn_p1 = sp
+        self._start_preview()
+        if self._conn_src is None:
+            self.op_label.setText("连接线：请【从一个对象上】按下，拖到另一个对象松手")
+        else:
+            self.op_label.setText("连接线：拖到目标对象松手 → 建立带箭头连线（自动跟随移动）")
+
+    def _connector_move(self, sp: QtCore.QPointF):
+        if self._sel_preview is None or getattr(self, "_conn_p0", None) is None:
+            return
+        self._conn_p1 = sp
+        qp = QtGui.QPainterPath(self._conn_p0)
+        qp.lineTo(sp)
+        self._sel_preview.setPath(qp)
+
+    def _connector_end(self):
+        p0 = getattr(self, "_conn_p0", None)
+        self._conn_p0 = None
+        self._remove_preview()
+        if p0 is None:
+            return
+        src = getattr(self, "_conn_src", None)
+        self._conn_src = None
+        dst = self._layer_at_scene(getattr(self, "_conn_p1", p0))
+        if src is None or dst is None:
+            self.op_label.setText("连接线未建立：起点和终点都要落在一个对象上"); return
+        if src is dst:
+            self.op_label.setText("连接线未建立：起点和终点是同一个对象"); return
+        import connector_item
+        self._push_history("连接线")
+        c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"))
+        self.scene.addItem(c)
+        self.connectors.append(c)
+        if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
+            self.scene.removeItem(c); self.connectors.remove(c)
+            self.op_label.setText("连接线建立失败（拿不到对象外框）"); return
+        self.op_label.setText("✓ 已连接两个对象 · 移动/缩放任一对象，连线两端自动跟随")
+
     # ----- 矢量内部编辑结果上浮（B3 起已入历史，纯 op_label，无「不可撤销」提示）-----
     def _note_vec_edit(self, msg: str):
         self.op_label.setText(msg)
@@ -5133,6 +5214,8 @@ class EditorWindow(QtWidgets.QMainWindow):
             self._wand_at(scene_pos); return
         if tool.startswith("sh_"):  # 形状工具：矩形/椭圆/直线/箭头
             self._shape_start(scene_pos); return
+        if tool == "connector":  # 智能连接线：从对象拖到对象
+            self._connector_start(scene_pos); return
         if tool in ("lasso", "brush") and self.selection_mask is not None \
                 and self._point_in_selection(scene_pos):
             mods = QtWidgets.QApplication.keyboardModifiers()
@@ -5165,6 +5248,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         tool = self.view._tool
         if tool.startswith("sh_"):
             self._shape_move(scene_pos); return
+        if tool == "connector":
+            self._connector_move(scene_pos); return
         if tool == "lasso":
             self._lasso_move(scene_pos); return
         if tool == "brush":
@@ -5178,6 +5263,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         tool = self.view._tool
         if tool.startswith("sh_"):
             self._shape_end(); return
+        if tool == "connector":
+            self._connector_end(); return
         if tool == "lasso":
             self._lasso_end(); return
         if tool == "brush":
@@ -6201,6 +6288,11 @@ class EditorWindow(QtWidgets.QMainWindow):
                 p.setOpacity(float(layer.get("opacity", 1.0)))  # 否则 PNG/TIFF/PDF 忽略层不透明度，导出与画布不符
                 p.drawImage(0, 0, image_ops.masked_qimage(layer["image"], layer.get("mask")))  # 应用非破坏蒙版(画布同源)
                 p.restore()
+        for c in getattr(self, "connectors", []):  # 智能连接线（scene 坐标=画布坐标）画进合成，导出不丢
+            if c.isVisible():
+                p.setPen(c.pen()); p.setBrush(c.brush())
+                p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+                p.drawPath(c.path())
         p.end()
         return out
 

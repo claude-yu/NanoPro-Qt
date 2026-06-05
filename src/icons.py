@@ -205,6 +205,15 @@ def tool_icon(name: str, color: str = "#cdd2db", size: int = 22) -> QtGui.QIcon:
         path.moveTo(s * 0.80, s * 0.18); path.lineTo(s * 0.56, s * 0.30); path.lineTo(s * 0.70, s * 0.44)
         path.closeSubpath()
         pt.drawPath(path)
+    elif name == "connector":  # 智能连接线：两个小方块 + 中间带箭头的连线
+        pt.drawRect(QtCore.QRectF(s * 0.12, s * 0.16, s * 0.26, s * 0.22))   # 左对象
+        pt.drawRect(QtCore.QRectF(s * 0.62, s * 0.62, s * 0.26, s * 0.22))   # 右对象
+        _line(pt, s * 0.38, s * 0.30, s * 0.66, s * 0.66)                    # 连线
+        pt.setBrush(QtGui.QColor(color))
+        path = QtGui.QPainterPath()
+        path.moveTo(s * 0.70, s * 0.72); path.lineTo(s * 0.52, s * 0.62); path.lineTo(s * 0.60, s * 0.50)
+        path.closeSubpath()
+        pt.drawPath(path)
     elif name == "hand":
         for fx, top in ((0.36, 0.30), (0.50, 0.22), (0.64, 0.24), (0.76, 0.32)):  # 四指
             _line(pt, s * fx, s * top, s * fx, s * 0.60)

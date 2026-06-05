@@ -18,6 +18,7 @@ class ImageLayerItem(QtWidgets.QGraphicsItem):
         self._press_cb = None         # 被按下时回调（用于设为激活层）
         self._snap_cb = None          # 落点吸附回调 (QPointF)->QPointF（参考线/画布边/中线/其它层）
         self._release_cb = None       # 松手回调（清智能参考线洋红虚线）
+        self._post_move_cb = None     # 位置/变换【已变化后】回调（智能连接线据此跟随；含拖动/对齐/缩放）
         self._moved_this_drag = False
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -34,6 +35,11 @@ class ImageLayerItem(QtWidgets.QGraphicsItem):
                     self._move_cb()
             if self._snap_cb is not None:
                 value = self._snap_cb(value)  # value=即将生效的新 pos，返回吸附后的 pos（Qt 用返回值作最终 pos）
+        elif change in (QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,
+                        QtWidgets.QGraphicsItem.GraphicsItemChange.ItemTransformHasChanged,
+                        QtWidgets.QGraphicsItem.GraphicsItemChange.ItemScaleHasChanged):
+            if self._post_move_cb is not None:
+                self._post_move_cb()  # 位置/缩放已落定 → 通知连接线按新外框跟随
         return super().itemChange(change, value)
 
     def mousePressEvent(self, e):
