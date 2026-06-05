@@ -1472,6 +1472,11 @@ class EditorWindow(QtWidgets.QMainWindow):
         b_exp_cat.clicked.connect(self._export_assets_by_category)
         _mfrow.addWidget(b_gen_mf); _mfrow.addWidget(b_exp_cat)
         al.addLayout(_mfrow)
+        b_split = QtWidgets.QPushButton("✂ 拆分合集为单个图标…")
+        b_split.setToolTip("把当前分类里的「图标合集」大图(一张纸排了多个图标)按空白沟槽切成单个图标 PNG，"
+                           "输出到新文件夹——拆开后一图一图标，缩略图又大又清楚（解决合集图标看不清）。")
+        b_split.clicked.connect(self._split_montage_assets)
+        al.addWidget(b_split)
         # 分类树（BioRender 式：分类→子分类，点哪个只加载它的直属图 → 海量库不卡）
         self.asset_tree = QtWidgets.QTreeWidget()
         self.asset_tree.setHeaderHidden(True)
@@ -1494,13 +1499,26 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.asset_fs_count = QtWidgets.QLabel(""); self.asset_fs_count.setObjectName("hint")
         _srow.addWidget(self.asset_fs_count)
         al.addLayout(_srow)
+        # —— 缩略图大小滑块（BioRender 式：用户自己拖大/拖小，直接解决“图标太小看不清”）——
+        self._asset_thumb = 140  # 默认放大到 140（比 96 明显大、看得清）
+        _zrow = QtWidgets.QHBoxLayout()
+        _zrow.addWidget(self._hint("缩略图大小"))
+        self.asset_zoom = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.asset_zoom.setRange(72, 240); self.asset_zoom.setValue(self._asset_thumb)
+        self.asset_zoom.setToolTip("拖动调整素材缩略图大小（看不清就拖大）")
+        self.asset_zoom.valueChanged.connect(self._on_asset_thumb_size)
+        _zrow.addWidget(self.asset_zoom, 1)
+        al.addLayout(_zrow)
         self.asset_fs_list = AssetListWidget()
         self.asset_fs_list.setObjectName("assetGrid")  # 同样给本地素材卡片边界
         self.asset_fs_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
-        self.asset_fs_list.setIconSize(QtCore.QSize(84, 84))
+        self.asset_fs_list.setIconSize(QtCore.QSize(self._asset_thumb, self._asset_thumb))
+        self.asset_fs_list.setGridSize(QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + 16))  # 固定大格子：懒加载的空 item 不会把格子缩小
         self.asset_fs_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
         self.asset_fs_list.setMovement(QtWidgets.QListWidget.Movement.Static)
-        self.asset_fs_list.setUniformItemSizes(True)  # 等大格 → 海量项布局快
+        # 注意：【不】用 setUniformItemSizes——它会按懒加载时第一个空 item 把装饰区缓存成 0，
+        # 导致之后解码的缩略图被画进 0 尺寸装饰区、永远显示很小（与 gridSize/iconSize 无关）。
+        # 用 gridSize 固定大格 + 上限 800 + 懒加载即可保证不卡，无需 uniformItemSizes。
         self.asset_fs_list.setLayoutMode(QtWidgets.QListView.LayoutMode.Batched)  # 分批布局，不一次卡死
         self.asset_fs_list.setBatchSize(200)
         self.asset_fs_list.setDragEnabled(True)
@@ -6234,6 +6252,56 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._asset_filter = ""
         self._refresh_asset_thumbs()
 
+    def _split_montage_assets(self):
+        """把当前分类里的「图标合集」大图批量按空白沟槽拆成单个图标 PNG → 输出到新文件夹。
+        拆开后一图一图标，缩略图又大又清楚——根治“合集里每个图标太小看不清”。大声失败：报拆/跳/败计数。"""
+        import os
+        items = list(self._asset_cur_items or []) or list(self._asset_all_items or [])
+        if not items:
+            QtWidgets.QMessageBox.information(self, "拆分合集", "当前分类没有素材。先连接素材文件夹并在分类树里点一个分类。")
+            return
+        out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择拆分结果的输出文件夹（会写入若干单个图标 PNG）")
+        if not out:
+            return
+        prog = QtWidgets.QProgressDialog("正在拆分合集…", "取消", 0, len(items), self)
+        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal); prog.setMinimumDuration(0)
+        sheets = pieces = failed = skipped = 0
+        for k, it in enumerate(items):
+            if prog.wasCanceled():
+                break
+            prog.setValue(k); QtWidgets.QApplication.processEvents()
+            path = it.get("path")
+            qi = QtGui.QImage(path) if path else QtGui.QImage()
+            if qi.isNull():
+                failed += 1; continue
+            qi = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+            try:
+                boxes = image_ops.split_montage(image_ops.qimage_to_rgba(qi))
+            except Exception:
+                failed += 1; continue
+            if len(boxes) <= 1:                       # 切不出多块=本就是单图 → 跳过(计数，不静默)
+                skipped += 1; continue
+            sheets += 1
+            stem = os.path.splitext(os.path.basename(path))[0]
+            for idx, (x, y, w, h) in enumerate(boxes):
+                crop = qi.copy(int(x), int(y), int(w), int(h))
+                dst = os.path.join(out, "%s_%02d.png" % (stem, idx + 1))
+                if crop.save(dst, "PNG"):
+                    pieces += 1
+                else:
+                    failed += 1
+        prog.setValue(len(items))
+        msg = ("拆分完成：\n  合集大图 %d 张 → 切出单个图标 %d 个\n"
+               "  跳过(本就是单图，无需拆) %d 张\n  失败 %d\n  输出目录：%s"
+               % (sheets, pieces, skipped, failed, out))
+        if pieces and QtWidgets.QMessageBox.question(
+                self, "拆分合集", msg + "\n\n是否立即连接这个文件夹作为素材库（即看拆分后的清晰图标）？",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+                ) == QtWidgets.QMessageBox.StandardButton.Yes:
+            config.set_asset_dir(out); self._load_asset_dir()
+        else:
+            QtWidgets.QMessageBox.information(self, "拆分合集", msg)
+
     def _build_asset_manifest(self):
         """给当前素材根目录一键生成 manifest.json（按子文件夹分类，递归收深层图），再重扫刷新。"""
         root = config.get_asset_dir()
@@ -6346,11 +6414,14 @@ class EditorWindow(QtWidgets.QMainWindow):
         a = first.row() if first.isValid() else 0
         b = last.row() if last.isValid() else (a + 60)   # 布局未就绪/视口超出 → 只解码前一截，绝不误解全部
         a = max(0, a - 30); b = min(n - 1, b + 30)
-        TH = max(48, lst.iconSize().width())  # 按当前缩略图大小解码（调大后更清晰）
+        base = max(48, lst.iconSize().width())   # 逻辑像素的目标缩略图边长
+        dpr = max(1.0, self.devicePixelRatioF())  # 高分屏：按物理像素解码再标 dpr → 大且清晰，不糊不缩
+        TH = int(round(base * dpr))               # 实际解码到的物理像素边长
         DR = QtCore.Qt.ItemDataRole.UserRole + 1  # 解码完成标记
+        DSZ = QtCore.Qt.ItemDataRole.UserRole + 2  # 已解码时的目标边长（变大后需重解）
         for r in range(a, b + 1):
             lw = lst.item(r)
-            if lw is None or lw.data(DR):
+            if lw is None or (lw.data(DR) and lw.data(DSZ) == base):
                 continue
             rd = QtGui.QImageReader(lw.data(QtCore.Qt.ItemDataRole.UserRole))  # 缩放解码，不全解大图
             rd.setAutoTransform(True)
@@ -6360,8 +6431,26 @@ class EditorWindow(QtWidgets.QMainWindow):
                 rd.setScaledSize(sz)
             img = rd.read()
             if not img.isNull():
-                lw.setIcon(QtGui.QIcon(QtGui.QPixmap.fromImage(img)))
-            lw.setData(DR, True)
+                pm = QtGui.QPixmap.fromImage(img)
+                if pm.width() < TH and pm.height() < TH:  # 小图标放大到格子大小，看得清（大图已缩放解码）
+                    pm = pm.scaled(TH, TH, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                   QtCore.Qt.TransformationMode.SmoothTransformation)
+                pm.setDevicePixelRatio(dpr)  # 标记物理/逻辑比 → Qt 按逻辑 base 显示且清晰
+                lw.setIcon(QtGui.QIcon(pm))
+            lw.setData(DR, True); lw.setData(DSZ, base)
+
+    def _on_asset_thumb_size(self, val):
+        """滑块改变缩略图大小：调 iconSize/gridSize + 清解码标记重新解码（直接解决“太小”）。"""
+        self._asset_thumb = int(val)
+        lst = self.asset_fs_list
+        lst.setIconSize(QtCore.QSize(self._asset_thumb, self._asset_thumb))
+        lst.setGridSize(QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + 16))
+        DR = QtCore.Qt.ItemDataRole.UserRole + 1
+        for r in range(lst.count()):  # 作废旧解码标记 → 下次懒解按新尺寸重解，否则停在旧小图
+            it = lst.item(r)
+            if it is not None:
+                it.setData(DR, False)
+        self._thumb_timer.start()
 
     def _place_asset(self, scene_pos: QtCore.QPointF, path: str):
         """素材拖到画布 drop 处：按原尺寸建图层，使图居中落在 scene_pos（clamp 不越界）。"""

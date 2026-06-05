@@ -301,6 +301,68 @@ def auto_decompose(rgba: np.ndarray, tol: int = 36, min_blob_frac: float = 0.000
     return out, ""
 
 
+def split_montage(rgba: np.ndarray, bg_tol: int = 20, min_gap: int = 0,
+                  min_cell: int = 24, max_cells: int = 400):
+    """把一张「图标合集」大图(白底上排着多个图标)按【空白沟槽】递归 XY-cut 切成单个图标。
+    用空白切而非连通块：一个图标常由多笔不相连的笔画组成，连通块会把它碎成几十片；
+    空白沟槽切法整块保留图标(含其下方小标签)。返回 [(x,y,w,h)] 紧致包围盒(已去四周空白)。
+    bg_tol: 与背景色差≤此值算空白；min_gap: 0=自适应(按图尺寸~1%)；min_cell: 小于此边长的块丢弃。
+    纯 numpy，可 headless 单测。"""
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 3:
+        return []
+    h, w = rgba.shape[:2]
+    rgb = rgba[:, :, :3].astype(np.int16)
+    alpha = rgba[:, :, 3] if rgba.shape[2] >= 4 else np.full((h, w), 255, np.uint8)
+    corners = np.array([rgb[0, 0], rgb[0, -1], rgb[-1, 0], rgb[-1, -1]], dtype=np.int16)
+    bg = np.median(corners, axis=0)                       # 背景色=四角中位(对白底/任意纯底都稳)
+    diff = np.abs(rgb - bg).max(axis=2)
+    ink = (diff > bg_tol) & (alpha > 8)                   # True=有内容(墨), False=背景空白
+    gap = min_gap if min_gap > 0 else max(6, int(0.012 * max(h, w)))  # 自适应沟槽阈值
+    boxes = []
+
+    def biggest_gap(empty):
+        """1D 布尔(True=该行/列全空) → 内部最长空白游程 (长度, 起, 止)。两端空白已被收缩排除。"""
+        best, i, n = (0, -1, -1), 0, len(empty)
+        while i < n:
+            if empty[i]:
+                j = i
+                while j < n and empty[j]:
+                    j += 1
+                if j - i > best[0]:
+                    best = (j - i, i, j)
+                i = j
+            else:
+                i += 1
+        return best
+
+    def cut(x0, y0, x1, y1, depth):
+        sub = ink[y0:y1, x0:x1]
+        if sub.size == 0 or not sub.any():
+            return
+        cols = np.where(sub.any(axis=0))[0]               # 先收缩到紧致内容框
+        rows = np.where(sub.any(axis=1))[0]
+        nx0, nx1 = x0 + int(cols[0]), x0 + int(cols[-1]) + 1
+        ny0, ny1 = y0 + int(rows[0]), y0 + int(rows[-1]) + 1
+        sub = ink[ny0:ny1, nx0:nx1]
+        sh, sw = sub.shape
+        if depth > 60:
+            boxes.append((nx0, ny0, sw, sh)); return
+        cg = biggest_gap(~sub.any(axis=0))                # 列方向最大空白(竖直沟槽)
+        rg = biggest_gap(~sub.any(axis=1))                # 行方向最大空白(水平沟槽)
+        if cg[0] >= rg[0] and cg[0] >= gap and 0 < cg[1] and cg[2] < sw:
+            mid = nx0 + (cg[1] + cg[2]) // 2              # 沿竖直沟槽切左右
+            cut(nx0, ny0, mid, ny1, depth + 1); cut(mid, ny0, nx1, ny1, depth + 1)
+        elif rg[0] >= gap and 0 < rg[1] and rg[2] < sh:
+            mid = ny0 + (rg[1] + rg[2]) // 2              # 沿水平沟槽切上下
+            cut(nx0, ny0, nx1, mid, depth + 1); cut(nx0, mid, nx1, ny1, depth + 1)
+        elif sw >= min_cell and sh >= min_cell:           # 无可切沟槽 → 一个叶子单元
+            boxes.append((nx0, ny0, sw, sh))
+
+    cut(0, 0, w, h, 0)
+    boxes.sort(key=lambda b: (b[1] // max(1, min_cell), b[0]))  # 按阅读序(行优先)排
+    return boxes[:max_cells]
+
+
 def mask_contours(mask: np.ndarray):
     """掩码 → 轮廓点列表（每个为 Nx2 int 数组，含内外边界），用于画蚂蚁线 / 涂抹预览。
 
