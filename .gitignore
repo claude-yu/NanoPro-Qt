@@ -1,0 +1,41 @@
+# ===== 构建产物（不上传，体积大且可重建）=====
+dist/
+build/
+Output/
+*.zip
+*.exe
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ===== 凭据 / 本地配置（绝不上传：API Key 只存用户家目录 ~/.sciedit/config.json）=====
+.env
+config.json
+.sciedit/
+*.key
+*.pem
+
+# ===== 内部开发文档（进度/交接/计划，不对外公开）=====
+progress.md
+progress.archive.md
+PLAN.md
+ALIGNMENT_PLAN.md
+FILE_REGISTRY.md
+handoff-*.md
+
+# ===== 测试 / 临时产物 =====
+ai_i2i_test.png
+_verify_*.py
+src/_*.svg
+src/_*.py
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
