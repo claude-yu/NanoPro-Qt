@@ -1409,10 +1409,10 @@ class VectorMixin:
     def _shape_move(self, sp: QtCore.QPointF):
         if getattr(self, "_shape_p0", None) is None or self._sel_preview is None:
             return
-        if self.view._tool in ("sh_arrow", "sh_line"):  # 箭头/直线终点吸附到对象边中点
+        constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if self.view._tool in ("sh_arrow", "sh_line") and not constrain:  # 箭头/直线终点吸附边中点；按 Shift 约束角度时不吸,免破坏 45°
             sp = self._snap_to_anchor(sp)
         self._shape_p1 = sp
-        constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
         self._sel_preview.setPath(self._shape_path(self.view._tool, self._shape_p0, sp, constrain))
 
     def _shape_end(self):
@@ -1425,16 +1425,18 @@ class VectorMixin:
         if QtCore.QLineF(p0, p1).length() < 3:  # 太小=误点，忽略
             self._shape_anchor_src = None
             return
-        # 箭头/直线【两端都吸在对象锚点上】→ 建跟随式连接线（移动自动跟随，像 BioRender），不画静态形状
+        # 箭头/直线两端的吸锚判定：两端都吸对象→跟随式连线；同对象→取消；否则落地静态形状
         if tool in ("sh_arrow", "sh_line"):
             src = getattr(self, "_shape_anchor_src", None)
+            self._shape_anchor_src = None  # 先清，避免后续异常/分支串联到下次手势
             dst = self._anchor_object_at(p1)
-            self._shape_anchor_src = None
-            if src and dst and not (src[0] is dst[0] and src[1] == dst[1]):
+            if src is not None and dst is not None:
+                if src[0] is dst[0] and src[1] == dst[1]:   # 两端在同一对象/同一元素 → 取消（不画起终点重合的畸形形状）
+                    self.op_label.setText("起点和终点在同一对象上，未建连线"); return
                 if self._create_connector(src[0], src[1], dst[0], dst[1], arrow=(tool == "sh_arrow")) is not None:
                     self.op_label.setText("✓ 已建跟随式%s（连在边中心·移动自动跟随·右键改形状/颜色/删除）"
                                           % ("箭头" if tool == "sh_arrow" else "连线"))
-                    return  # 两端绑定 → 不再落地静态形状
+                    return  # 两端绑定不同对象 → 不再落地静态形状
         qp = self._shape_path(tool, p0, p1, constrain)
         nm = self._SHAPE_NAMES.get(tool, "形状")
         fill = "#333333" if tool == "sh_arrow" else None  # 箭头三角形实心；矩形/椭圆/线=描边轮廓

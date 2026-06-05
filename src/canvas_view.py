@@ -222,8 +222,8 @@ class CanvasView(QtWidgets.QGraphicsView):
             r = 3.0 / max(self._zoom, 1e-6)  # 端点方块在屏幕上恒约 6px
             for pe in (p0, p1):
                 painter.drawRect(QtCore.QRectF(pe.x() - r, pe.y() - r, 2 * r, 2 * r))
-        # 连接线工具：悬停对象的 4 个边中点锚点（蓝点，BioRender 式 → 让用户看到能连到哪、连在边中心）
-        if self._tool == "connector" and _anchors:
+        # 连接线/箭头/直线工具：悬停对象的 4 个边中点锚点（蓝点，BioRender 式 → 让用户看到能连到哪、连在边中心）
+        if _draw_anchors:
             apen = QtGui.QPen(QtGui.QColor("#1a73e8"), 0); apen.setCosmetic(True)
             painter.setPen(apen); painter.setBrush(QtGui.QColor(255, 255, 255))
             ar = 5.0 / max(self._zoom, 1e-6)  # 锚点在屏幕上恒约 10px

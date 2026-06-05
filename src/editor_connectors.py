@@ -150,14 +150,14 @@ class ConnectorsMixin:
         """从两个对象 (layer,eidx) 建一条【跟随式】连接线；成功返回 ConnectorItem，失败返回 None。
         连接线工具 + 锚定的箭头/直线共用这条管线（箭头 arrow=True、直线 arrow=False）。"""
         import connector_item
-        self._push_history(label)
         c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"),
                                          src_eidx=src_e, dst_eidx=dst_e, arrow=arrow)
         self.scene.addItem(c)
         self.connectors.append(c)
-        if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
+        if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud（未入历史，不留幻影撤销节点）
             self.scene.removeItem(c); self.connectors.remove(c)
             return None
+        self._push_history(label)  # 成功后才入历史
         return c
 
     def _refresh_connectors(self):
