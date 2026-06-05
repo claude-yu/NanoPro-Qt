@@ -22,6 +22,16 @@
 
 ---
 
+## 🖥 界面一览
+
+<p align="center">
+  <img src="docs/images/screenshot.png" alt="SciEdit / NanoPro 实际界面" width="900">
+</p>
+
+<sub>左侧 PS 式竖排工具栏 · 中间 QGraphicsView 画布（标尺/参考线）· 右侧 Qt-ADS 可拖拽停靠面板：选区与拆解 / 文字 / 矢量属性 · 素材库（本地库 ⇄ 抠出素材 Tab）· 图层 / 历史记录。</sub>
+
+---
+
 ## ✨ 亮点
 
 ### 🔗 智能连接线 —— 对齐 BioRender 的 Smart Connect
