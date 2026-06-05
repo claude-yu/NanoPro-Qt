@@ -4,7 +4,7 @@
 
 #define MyAppName "SciEdit 科研图编辑器"
 #define MyAppExeName "NanoPro.exe"
-#define MyAppVersion "1.8"
+#define MyAppVersion "1.9"
 #define MyAppPublisher "NanoPro"
 
 [Setup]
@@ -21,7 +21,7 @@ DefaultGroupName=SciEdit NanoPro
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 OutputDir=Output
-OutputBaseFilename=SciEdit_NanoPro_Setup_v1.8
+OutputBaseFilename=SciEdit_NanoPro_Setup_v1.9
 SetupIconFile=NanoPro.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
