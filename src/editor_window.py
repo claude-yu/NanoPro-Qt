@@ -1884,6 +1884,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
                 self._node_restore_key = (lyr.get("uid"), self._vec_pair_index(lyr, tgt))
         self._clear_node_overlay()    # B5：target item 即将被 removeItem 重建，overlay 必须先清，否则悬空崩
         self._cancel_pen()            # B5：撤销时丢弃任何未完成的钢笔预览（其 item 非 layer，安全直接销毁）
+        self._clear_connector_hover()  # 撤销/重做前清掉连接线悬停锚点，避免指向被重建对象的失效锚点
         self._clear_selection()
         self._outline.setParentItem(None); self._outline.hide()
         self._resize_handle.setParentItem(None); self._resize_handle.hide()

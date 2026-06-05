@@ -15,15 +15,22 @@ from PySide6 import QtCore, QtGui, QtWidgets
 class ConnectorsMixin:
     # ----- 智能连接线：从对象拖到对象建带箭头连线，移动/缩放自动跟随（BioRender 式）-----
     def _layer_at_scene(self, pt: QtCore.QPointF):
-        """命中该 scene 点的【最上层可见图层】（用外框 bbox 命中，连接线锚到对象框）。"""
+        """命中该 scene 点的【最上层可见图层】（用外框 bbox 命中，连接线锚到对象框）。
+        跳过【铺满画布的背景层】（面积≥95%画布）——白底/背景不作为连接目标，否则悬停空白处也冒锚点。"""
+        cw, ch = self.canvas_size or (0, 0)
+        bg_area = 0.95 * cw * ch if (cw and ch) else None
         best = None
         for l in self.layers:
             it = l.get("item")
             if it is None or it.scene() is None or not l.get("visible", True):
                 continue
-            if it.sceneBoundingRect().contains(pt):
-                if best is None or it.zValue() >= best["item"].zValue():
-                    best = l
+            r = it.sceneBoundingRect()
+            if not r.contains(pt):
+                continue
+            if bg_area is not None and (r.width() * r.height()) >= bg_area:
+                continue  # 铺满画布的背景层 → 不当连接目标
+            if best is None or it.zValue() >= best["item"].zValue():
+                best = l
         return best
 
     def _connector_rect(self, uid):
@@ -76,19 +83,28 @@ class ConnectorsMixin:
 
     def _on_connector_hover(self, scene_pos):
         """连接线工具悬停：命中对象 → 算它 4 个边中点锚点存 self._conn_hover_anchors（drawForeground 画蓝点）；
-        没命中 → 清空。让用户像 BioRender 一样看到能连到哪、连在边的正中。"""
+        没命中 → 清空。让用户像 BioRender 一样看到能连到哪、连在边的正中。
+        性能：光标几乎没动(<6px)直接返回，避免每帧都遍历所有图层(大画布/多层时卡)。"""
+        last = getattr(self, "_conn_hover_last", None)
+        if last is not None and (scene_pos - last).manhattanLength() < 6.0:
+            return
+        self._conn_hover_last = QtCore.QPointF(scene_pos)
         import connector_item
         lyr = self._layer_at_scene(scene_pos)
+        uid = lyr.get("uid") if lyr is not None else None
         anchors = []
         if lyr is not None:
-            r = self._connector_rect(lyr.get("uid"))
+            r = self._connector_rect(uid)
             if r is not None:
                 anchors = connector_item.anchor_points(r)
-        if anchors != getattr(self, "_conn_hover_anchors", []):
+        if uid != getattr(self, "_conn_hover_uid", None) or anchors != getattr(self, "_conn_hover_anchors", []):
+            self._conn_hover_uid = uid
             self._conn_hover_anchors = anchors
             self.view.viewport().update()
 
     def _clear_connector_hover(self):
+        self._conn_hover_uid = None
+        self._conn_hover_last = None
         if getattr(self, "_conn_hover_anchors", None):
             self._conn_hover_anchors = []
             self.view.viewport().update()

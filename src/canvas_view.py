@@ -184,8 +184,9 @@ class CanvasView(QtWidgets.QGraphicsView):
         _ed = getattr(self, "_editor", None)
         _ag = getattr(_ed, "_active_guides", None) if _ed is not None else None
         _anchors = getattr(_ed, "_conn_hover_anchors", None) if _ed is not None else None
+        _draw_anchors = self._tool == "connector" and _anchors  # 仅连接线工具下画锚点
         if (not (self._guides_visible and (self._guides_v or self._guides_h))
-                and not _ag and self._measure_start is None and not _anchors):
+                and not _ag and self._measure_start is None and not _draw_anchors):
             return
         if self._guides_visible:  # 用户参考线（从标尺拖出）：主题描边色细实线
             pen = QtGui.QPen(QtGui.QColor(theme.colors()["outline"]), 0)
