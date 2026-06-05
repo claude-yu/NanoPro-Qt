@@ -27,14 +27,42 @@ class ConnectorsMixin:
         return best
 
     def _connector_rect(self, uid):
-        """连接线端点对象的当前外框（scene 坐标）；对象已删/脱离场景 → None（连接线据此自删）。"""
+        """连接线端点对象的当前外框（scene 坐标）；对象已删/脱离场景 → None（连接线据此自删）。
+        用【不透明内容】的紧致框（去掉素材四周透明留白）→ 箭头指到真正的图、不指空白大框（仿 BioRender 紧致图标）。"""
         lyr = next((l for l in self.layers if l.get("uid") == uid), None)
         if lyr is None:
             return None
         it = lyr.get("item")
         if it is None or it.scene() is None:
             return None
+        cb = self._content_bbox_item(lyr)  # item 局部坐标的内容框；矢量/空透明 → None
+        if cb is not None and cb.isValid():
+            return it.mapToScene(cb).boundingRect()  # 含 pos/scale 映射到 scene
         return it.sceneBoundingRect()
+
+    def _content_bbox_item(self, lyr):
+        """该层【不透明内容】在 item 局部坐标(0..w,0..h)的紧致 QRectF；按图 cacheKey 缓存，仅图变时重算。
+        矢量层(path 本身就紧)或无 image → None（回退用整框）。"""
+        if lyr.get("kind") == "vector":
+            return None
+        img = lyr.get("image")
+        if img is None:
+            return None
+        key = img.cacheKey()
+        cache = lyr.get("_cbbox")
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        import image_ops
+        rect = None
+        try:
+            bb = image_ops.content_bbox(image_ops.qimage_to_rgba(img))
+            if bb is not None:
+                x0, y0, x1, y1 = bb
+                rect = QtCore.QRectF(x0, y0, x1 - x0, y1 - y0)
+        except Exception:
+            rect = None
+        lyr["_cbbox"] = (key, rect)
+        return rect
 
     def _refresh_connectors(self):
         """重算所有连接线端点（对象移动/缩放/对齐后跟随）；端点对象没了的连接线自动移除（大声：不留悬空线）。"""

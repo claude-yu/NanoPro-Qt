@@ -39,6 +39,8 @@ class VectorMixin:
         if isinstance(it, QtWidgets.QGraphicsItemGroup):
             for child in it.childItems():
                 self._wire_vec_item(child)
+        else:  # 设备坐标缓存：拖动/缩放只贴缓存位图，不每帧重渲染填充路径 → 箭头/形状拖动丝滑（栅格层早已开）
+            it.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.DeviceCoordinateCache)
 
     def import_svg(self, path: str | None = None):
         """导入 SVG → 拆成可选/可移动的独立矢量图元（<path>/<text>/<g>），登记为一条 kind='vector' 层。

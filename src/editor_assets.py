@@ -41,7 +41,10 @@ class _AssetScanTask(QtCore.QRunnable):
             node, all_items, err = asset_lib.scan_asset_tree(self._root)
         except Exception as e:  # 大声失败：异常也回主线程提示，不静默吞
             node, all_items, err = None, [], "扫描失败：%s" % e
-        self._signals.done.emit(self._gen, node, all_items, err)
+        try:
+            self._signals.done.emit(self._gen, node, all_items, err)
+        except RuntimeError:
+            pass  # 扫描中关窗等 → 信号源(QObject)已销毁，安全丢弃，不刷 traceback
 
 
 class AssetsMixin:
@@ -52,9 +55,9 @@ class AssetsMixin:
             if res is None:
                 QtWidgets.QMessageBox.information(self, "提示", "选区为空")
                 return
-            self.assets.append(res[0])
-        elif self.active:                                     # 无选区 → 把整个选中图层加入
-            self.assets.append(self.active["image"].copy())
+            self.assets.append(self._trim_transparent_qimage(res[0]))  # 裁透明边 → 素材=真正的图
+        elif self.active:                                     # 无选区 → 把整个选中图层加入（裁掉透明留白）
+            self.assets.append(self._trim_transparent_qimage(self.active["image"].copy()))
         else:
             QtWidgets.QMessageBox.information(self, "提示", "请先选中一个图层，或用套索/矩形/魔棒取选区")
             return
@@ -453,13 +456,31 @@ class AssetsMixin:
                 it.setData(DR, False)
         self._thumb_timer.start()
 
+    def _trim_transparent_qimage(self, img):
+        """裁掉 QImage 四周透明留白 → 紧致 QImage（图层框=真正的图，仿 BioRender；选择/磁吸/连接线全受益）。
+        本就紧致或全透明/无 alpha → 原样返回。"""
+        if img is None or img.isNull():
+            return img
+        try:
+            rgba = image_ops.qimage_to_rgba(img.convertToFormat(QtGui.QImage.Format.Format_RGBA8888))
+            bb = image_ops.content_bbox(rgba)
+        except Exception:
+            return img
+        if bb is None:
+            return img
+        x0, y0, x1, y1 = bb
+        if x0 == 0 and y0 == 0 and x1 == img.width() and y1 == img.height():
+            return img
+        return img.copy(x0, y0, x1 - x0, y1 - y0)
+
     def _place_asset(self, scene_pos: QtCore.QPointF, path: str):
-        """素材拖到画布 drop 处：按原尺寸建图层，使图居中落在 scene_pos（clamp 不越界）。"""
+        """素材拖到画布 drop 处：裁掉四周透明留白后建图层，使图居中落在 scene_pos（clamp 不越界）。"""
         img = QtGui.QImage(path)
         if img.isNull():
             self.op_label.setText("无法读取素材：%s" % path)
             return
         img = img.convertToFormat(QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+        img = self._trim_transparent_qimage(img)  # 裁透明边 → 图层框=真正的图（不再是大方框）
         self._push_history("放置素材")
         if not self.layers:  # 空画布 → 按图尺寸初始化（仿 _ai_place_b64 空画布分支）
             self.canvas_size = (img.width(), img.height())

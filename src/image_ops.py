@@ -190,6 +190,17 @@ def mask_bbox(mask: np.ndarray):
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
+def content_bbox(rgba: np.ndarray, thr: int = 8):
+    """【不透明内容】(alpha>thr) 的紧致外接矩形 (x0,y0,x1,y1) 半开区间；全透明/无 alpha 返回 None。
+    用于让连接线锚到素材【真正的图】而非四周带透明留白的整张大框（对齐 BioRender 紧致图标）。"""
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
+        return None
+    ys, xs = np.where(rgba[:, :, 3] > thr)
+    if xs.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
 def background_mask(rgba: np.ndarray, tol: int) -> np.ndarray:
     """背景掩码（移植 WebView backgroundMask, features.js:314-348）：双重判定——
     (a) 步进容差：每步只和**相邻像素**比、差够小才扩散；
