@@ -48,7 +48,10 @@ class AssetsMixin:
             it.setData(QtCore.Qt.ItemDataRole.UserRole, i)
             it.setSizeHint(QtCore.QSize(84, 84))
             self.asset_list.addItem(it)
-        self.asset_count.setText(str(len(self.assets)))
+        n = len(self.assets)
+        self.asset_count.setText(str(n))
+        if hasattr(self, "asset_tabbar"):  # 计数显示在「抠出素材 N」Tab 文案上（BioRender 式）
+            self.asset_tabbar.setTabText(1, "抠出素材 %d" % n)
 
     def _asset_clicked(self, item):
         i = item.data(QtCore.Qt.ItemDataRole.UserRole)

@@ -1487,115 +1487,112 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         exp_row.addWidget(b_expng); exp_row.addWidget(b_extiff); ll.addLayout(exp_row)
         ll.addWidget(self._hint("点选高亮、👁 显隐、双击重命名、拖拽行调层级；右键菜单：上/下移、勾选打组、删除、蒙版。底栏图标：新建/删除/打组/解组/亮度对比度/蒙版。隐藏的层不导出。"))
 
-        # —— 素材库 ——
+        # —— 素材库（BioRender 式：顶部 Tab 切「本地库/抠出素材」，只显一个，搜索置顶，次要操作收进 ⚙）——
         w_assets, al = make_panel()
-        ahdr = QtWidgets.QHBoxLayout()  # 标题 + 右上角素材计数徽标
-        _atitle = QtWidgets.QLabel("抠出素材"); _atitle.setObjectName("sectionTitle")
-        ahdr.addWidget(_atitle); ahdr.addStretch(1)
-        self.asset_count = QtWidgets.QLabel("0"); self.asset_count.setObjectName("countBadge")
-        self.asset_count.setToolTip("当前素材库里的素材数量")
-        ahdr.addWidget(self.asset_count)
-        al.addLayout(ahdr)
-        self.asset_list = QtWidgets.QListWidget()
-        self.asset_list.setObjectName("assetGrid")  # 每个素材带卡片边界（透明 PNG 不再糊成一片）
-        self.asset_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
-        self.asset_list.setIconSize(QtCore.QSize(72, 72))
-        self.asset_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
-        self.asset_list.setMovement(QtWidgets.QListWidget.Movement.Static)
-        self.asset_list.setSpacing(4); self.asset_list.setMinimumHeight(110)
-        self.asset_list.itemClicked.connect(self._asset_clicked)
-        self.asset_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键删除/导出单个素材
-        self.asset_list.customContextMenuRequested.connect(self._asset_menu)
-        for _sk in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):  # Del 和 退格 都能删选中素材
-            _del_sc = QtGui.QShortcut(QtGui.QKeySequence(_sk), self.asset_list)
-            _del_sc.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)  # 仅素材库聚焦时生效
-            _del_sc.activated.connect(self._delete_selected_asset)
-        al.addWidget(self.asset_list, 1)
-        arow = QtWidgets.QHBoxLayout()
-        b_expa = QtWidgets.QPushButton("导出全部"); b_expa.setToolTip("把素材库每个元素各存为一张透明 PNG")
-        b_expa.clicked.connect(self.export_assets)
-        b_clra = QtWidgets.QPushButton("清空"); b_clra.setProperty("danger", True)
-        b_clra.setToolTip("清空整个素材库（会弹确认）"); b_clra.clicked.connect(self.clear_assets)
-        arow.addWidget(b_expa); arow.addWidget(b_clra); al.addLayout(arow)
-        al.addWidget(self._hint("加入素材库/去背景/自动拆解的元素在此。单击放回画布；右键导出/删除单个；导出全部=各存透明 PNG。"))
+        al.setSpacing(6)
+        self.asset_tabbar = QtWidgets.QTabBar()  # 顶部分段：本地素材库 / 抠出素材（互不抢空间）
+        self.asset_tabbar.setObjectName("assetTabs")
+        self.asset_tabbar.setExpanding(True); self.asset_tabbar.setDrawBase(False)
+        self.asset_tabbar.addTab("本地素材库"); self.asset_tabbar.addTab("抠出素材 0")
+        al.addWidget(self.asset_tabbar)
+        self.asset_stack = QtWidgets.QStackedWidget()
+        self.asset_tabbar.currentChanged.connect(self.asset_stack.setCurrentIndex)
+        al.addWidget(self.asset_stack, 1)
 
-        # —— 本地素材库（biorender 式分类：连接一个本地文件夹，子文件夹=分类，拖到画布建图层）——
-        al.addWidget(self._hint("本地素材库：连接一个素材文件夹（子文件夹=分类）。缩略图【单击】放到画布中央、【拖动】放到指定位置。"))
-        b_conn_asset = QtWidgets.QPushButton("连接素材文件夹…")
-        b_conn_asset.setToolTip("选择一个本地素材根目录；其下每个含图的子文件夹作为一个分类，顶层散图归「未分类」")
-        b_conn_asset.clicked.connect(self._connect_asset_dir)
-        al.addWidget(b_conn_asset)
-        _mfrow = QtWidgets.QHBoxLayout()
-        b_gen_mf = QtWidgets.QPushButton("生成分类索引")
-        b_gen_mf.setToolTip("给当前素材文件夹一键生成 manifest.json：按子文件夹分类（递归收深层图）、顶层散图归未分类。"
-                            "生成后素材库/AI 参考图库都按分类用；纯平铺(无子文件夹)只会得到一个「未分类」。")
-        b_gen_mf.clicked.connect(self._build_asset_manifest)
-        b_exp_cat = QtWidgets.QPushButton("按分类导出…")
-        b_exp_cat.setToolTip("把当前素材库按【分类】导出到选定目录：每个分类一个子文件夹。"
-                             "自带 manifest 但图平铺的图包（如 科研简单风），可借此物理拆成分类文件夹。")
-        b_exp_cat.clicked.connect(self._export_assets_by_category)
-        _mfrow.addWidget(b_gen_mf); _mfrow.addWidget(b_exp_cat)
-        al.addLayout(_mfrow)
-        b_split = QtWidgets.QPushButton("✂ 拆分合集为单个图标…")
-        b_split.setToolTip("把当前分类里的「图标合集」大图(一张纸排了多个图标)按空白沟槽切成单个图标 PNG，"
-                           "输出到新文件夹——拆开后一图一图标，缩略图又大又清楚（解决合集图标看不清）。")
-        b_split.clicked.connect(self._split_montage_assets)
-        al.addWidget(b_split)
-        # 分类树（BioRender 式：分类→子分类，点哪个只加载它的直属图 → 海量库不卡）
-        self.asset_tree = QtWidgets.QTreeWidget()
-        self.asset_tree.setHeaderHidden(True)
-        self.asset_tree.setMaximumHeight(170)
-        self.asset_tree.setToolTip("素材分类树（=文件夹结构）。点一个分类→只加载它的直属图；子分类点开再看，不卡。")
-        self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
-        al.addWidget(self.asset_tree)
-        # 全局搜索（跨所有分类按名字找）
-        _srow = QtWidgets.QHBoxLayout()
+        # ===== 页0：本地素材库 =====
+        _page_local = QtWidgets.QWidget()
+        _pl = QtWidgets.QVBoxLayout(_page_local); _pl.setContentsMargins(0, 0, 0, 0); _pl.setSpacing(6)
+        _srow = QtWidgets.QHBoxLayout()  # 搜索 + ⚙ 菜单（连接/索引/按分类导出/拆分合集 全收进来）
         self.asset_search = QtWidgets.QLineEdit()
         self.asset_search.setPlaceholderText("🔍 搜索素材名（跨全部分类）…")
         self.asset_search.setClearButtonEnabled(True)
-        self._asset_filter = ""
-        self._asset_cur_items = []
-        self._asset_all_items = []
+        self._asset_filter = ""; self._asset_cur_items = []; self._asset_all_items = []
         self._search_timer = QtCore.QTimer(self); self._search_timer.setSingleShot(True); self._search_timer.setInterval(200)
         self._search_timer.timeout.connect(self._apply_asset_search)
         self.asset_search.textChanged.connect(lambda *_: self._search_timer.start())
         _srow.addWidget(self.asset_search, 1)
         self.asset_fs_count = QtWidgets.QLabel(""); self.asset_fs_count.setObjectName("hint")
         _srow.addWidget(self.asset_fs_count)
-        al.addLayout(_srow)
-        # —— 缩略图大小滑块（BioRender 式：用户自己拖大/拖小，直接解决“图标太小看不清”；大小持久化）——
-        self._asset_thumb = config.get_asset_thumb_size(140)  # 读回上次记住的大小（默认 140）
+        _gear = QtWidgets.QToolButton(); _gear.setText("⚙")
+        _gear.setToolTip("素材库操作：连接文件夹 / 生成分类索引 / 按分类导出 / 拆分合集")
+        _gear.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        _gear.setAutoRaise(True); _gear.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        _gmenu = QtWidgets.QMenu(_gear)
+        _gmenu.addAction("📁 连接素材文件夹…", self._connect_asset_dir)
+        _gmenu.addAction("🗂 生成分类索引", self._build_asset_manifest)
+        _gmenu.addAction("⬇ 按分类导出…", self._export_assets_by_category)
+        _gmenu.addSeparator()
+        _gmenu.addAction("✂ 拆分合集为单个图标…", self._split_montage_assets)
+        _gear.setMenu(_gmenu)
+        _srow.addWidget(_gear)
+        _pl.addLayout(_srow)
+        # 分类树（分类→子分类，点哪个只加载它的直属图 → 海量库不卡）
+        self.asset_tree = QtWidgets.QTreeWidget()
+        self.asset_tree.setHeaderHidden(True); self.asset_tree.setMaximumHeight(150)
+        self.asset_tree.setToolTip("素材分类树（=文件夹结构）。点一个分类→只加载它的直属图；子分类点开再看，不卡。")
+        self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
+        _pl.addWidget(self.asset_tree)
+        # 缩略图大小滑块（持久化，看不清就拖大）
+        self._asset_thumb = config.get_asset_thumb_size(140)
         _zrow = QtWidgets.QHBoxLayout()
         _zrow.addWidget(self._hint("缩略图大小"))
         self.asset_zoom = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.asset_zoom.setRange(72, 240); self.asset_zoom.setValue(self._asset_thumb)
         self.asset_zoom.setToolTip("拖动调整素材缩略图大小（看不清就拖大）·会被记住，下次打开保持")
         self.asset_zoom.valueChanged.connect(self._on_asset_thumb_size)
-        self.asset_zoom.sliderReleased.connect(lambda: config.set_asset_thumb_size(self._asset_thumb))  # 松手才存盘，不刷爆
+        self.asset_zoom.sliderReleased.connect(lambda: config.set_asset_thumb_size(self._asset_thumb))
         _zrow.addWidget(self.asset_zoom, 1)
-        al.addLayout(_zrow)
+        _pl.addLayout(_zrow)
         self.asset_fs_list = AssetListWidget()
-        self.asset_fs_list.setObjectName("assetGrid")  # 同样给本地素材卡片边界
+        self.asset_fs_list.setObjectName("assetGrid")  # 卡片边界
         self.asset_fs_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
         self.asset_fs_list.setIconSize(QtCore.QSize(self._asset_thumb, self._asset_thumb))
-        self.asset_fs_list.setGridSize(QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + 16))  # 固定大格子：懒加载的空 item 不会把格子缩小
+        self.asset_fs_list.setGridSize(QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + 16))  # 固定大格子：懒加载空 item 不缩格
         self.asset_fs_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
         self.asset_fs_list.setMovement(QtWidgets.QListWidget.Movement.Static)
-        # 注意：【不】用 setUniformItemSizes——它会按懒加载时第一个空 item 把装饰区缓存成 0，
-        # 导致之后解码的缩略图被画进 0 尺寸装饰区、永远显示很小（与 gridSize/iconSize 无关）。
-        # 用 gridSize 固定大格 + 上限 800 + 懒加载即可保证不卡，无需 uniformItemSizes。
-        self.asset_fs_list.setLayoutMode(QtWidgets.QListView.LayoutMode.Batched)  # 分批布局，不一次卡死
+        # 【不】用 setUniformItemSizes——它会按懒加载首个空 item 把装饰区缓存成 0，缩略图永远很小。
+        self.asset_fs_list.setLayoutMode(QtWidgets.QListView.LayoutMode.Batched)
         self.asset_fs_list.setBatchSize(200)
         self.asset_fs_list.setDragEnabled(True)
-        self.asset_fs_list.itemClicked.connect(self._fs_asset_clicked)  # 单击=放到画布中央（拖动=放到指定位置）
+        self.asset_fs_list.itemClicked.connect(self._fs_asset_clicked)  # 单击=放画布中央（拖动=放到指定位置）
         self.asset_fs_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键：放画布/收藏/拆分/定位
         self.asset_fs_list.customContextMenuRequested.connect(self._fs_asset_menu)
-        self.asset_fs_list.setSpacing(4); self.asset_fs_list.setMinimumHeight(110)
+        self.asset_fs_list.setSpacing(4); self.asset_fs_list.setMinimumHeight(140)
         self._thumb_timer = QtCore.QTimer(self); self._thumb_timer.setSingleShot(True); self._thumb_timer.setInterval(60)
         self._thumb_timer.timeout.connect(self._lazy_decode_asset_thumbs)  # 滚动去抖 → 只解码可见缩略图
         self.asset_fs_list.verticalScrollBar().valueChanged.connect(lambda *_: self._thumb_timer.start())
-        al.addWidget(self.asset_fs_list, 1)
-        self._asset_groups = []  # scan_assets 结果缓存：[{name, items:[{file, path}]}]
+        _pl.addWidget(self.asset_fs_list, 1)
+        _pl.addWidget(self._hint("首次使用：点右上 ⚙ →「连接素材文件夹」。缩略图单击放画布中央、拖动放到指定位置；右键有更多。"))
+        self._asset_groups = []
+        self.asset_stack.addWidget(_page_local)
+
+        # ===== 页1：抠出素材（抠图/去背景/拆解收集的元素）=====
+        _page_extract = QtWidgets.QWidget()
+        _pe = QtWidgets.QVBoxLayout(_page_extract); _pe.setContentsMargins(0, 0, 0, 0); _pe.setSpacing(6)
+        self.asset_count = QtWidgets.QLabel("0"); self.asset_count.setVisible(False)  # 隐藏；计数显示在 Tab 文案上
+        self.asset_list = QtWidgets.QListWidget()
+        self.asset_list.setObjectName("assetGrid")
+        self.asset_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
+        self.asset_list.setIconSize(QtCore.QSize(72, 72))
+        self.asset_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
+        self.asset_list.setMovement(QtWidgets.QListWidget.Movement.Static)
+        self.asset_list.setSpacing(4); self.asset_list.setMinimumHeight(140)
+        self.asset_list.itemClicked.connect(self._asset_clicked)
+        self.asset_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键删除/导出单个素材
+        self.asset_list.customContextMenuRequested.connect(self._asset_menu)
+        for _sk in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace):  # Del/退格 删选中素材
+            _del_sc = QtGui.QShortcut(QtGui.QKeySequence(_sk), self.asset_list)
+            _del_sc.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+            _del_sc.activated.connect(self._delete_selected_asset)
+        _pe.addWidget(self.asset_list, 1)
+        _erow = QtWidgets.QHBoxLayout()
+        b_expa = QtWidgets.QPushButton("导出全部"); b_expa.setToolTip("把素材库每个元素各存为一张透明 PNG")
+        b_expa.clicked.connect(self.export_assets)
+        b_clra = QtWidgets.QPushButton("清空"); b_clra.setProperty("danger", True)
+        b_clra.setToolTip("清空整个素材库（会弹确认）"); b_clra.clicked.connect(self.clear_assets)
+        _erow.addWidget(b_expa); _erow.addWidget(b_clra); _pe.addLayout(_erow)
+        _pe.addWidget(self._hint("抠图/去背景/自动拆解的元素在此。单击放回画布；右键导出/删除单个。"))
+        self.asset_stack.addWidget(_page_extract)
 
         # —— 历史记录（PS 历史面板）——
         w_hist, hl = make_panel()

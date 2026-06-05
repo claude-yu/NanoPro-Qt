@@ -110,6 +110,15 @@ QListWidget#assetGrid::item { border: 1px solid @border@; border-radius: 5px; ba
 QListWidget#assetGrid::item:hover { border-color: @accent@; }
 QListWidget#assetGrid::item:selected { border: 1px solid @accent@; background: @row_active@; }
 
+/* 素材库顶部分段 Tab（本地库 / 抠出素材）—— BioRender 式 pill 分段 */
+QTabBar#assetTabs { qproperty-drawBase: 0; }
+QTabBar#assetTabs::tab {
+  background: @panel@; color: @muted@; border: 1px solid @border@;
+  padding: 6px 10px; margin-right: 4px; border-radius: 7px; min-width: 60px; font-size: 12px;
+}
+QTabBar#assetTabs::tab:hover { background: @button_hover@; color: @text@; }
+QTabBar#assetTabs::tab:selected { background: @accent@; color: #ffffff; border-color: @accent@; }
+
 QProgressBar { background: @border@; border: none; border-radius: 4px; }
 QProgressBar::chunk { background: @accent@; border-radius: 4px; }
 
