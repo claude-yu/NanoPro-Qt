@@ -473,6 +473,38 @@ class AssetsMixin:
             return img
         return img.copy(x0, y0, x1 - x0, y1 - y0)
 
+    def _trim_active_layer(self):
+        """把当前图片/抠图图层【就地】裁掉四周透明留白 → 框=真正的图（内容保持原位）。
+        用于裁紧画布上已放好的旧素材。注意：不透明水印(如 pngtree 文字)裁不掉，那种用裁剪工具手动裁。"""
+        lyr = self.active
+        if not lyr or lyr.get("kind") == "vector" or lyr.get("image") is None:
+            self.op_label.setText("请先选中一个图片/抠图图层，再裁透明边"); return
+        img = lyr["image"]
+        try:
+            rgba = image_ops.qimage_to_rgba(img.convertToFormat(QtGui.QImage.Format.Format_RGBA8888))
+            bb = image_ops.content_bbox(rgba)
+        except Exception:
+            bb = None
+        if bb is None:
+            self.op_label.setText("该层全透明，无法裁剪"); return
+        x0, y0, x1, y1 = bb
+        if x0 == 0 and y0 == 0 and x1 == img.width() and y1 == img.height():
+            self.op_label.setText("该层已经紧贴内容，无需裁剪（若仍有大框，多半是不透明水印——用裁剪工具手动裁）"); return
+        self._push_history("裁透明边")
+        item = lyr["item"]
+        new_tl = item.mapToScene(QtCore.QPointF(x0, y0))  # 内容左上角的 scene 位置（含 pos/scale）→ 裁后保持原位
+        new_img = img.copy(x0, y0, x1 - x0, y1 - y0)
+        lyr["image"] = new_img
+        item.set_image(new_img)
+        lyr["_cbbox"] = None  # 内容框缓存失效
+        self._suspend_history = True
+        item.setPos(new_tl)
+        self._suspend_history = False
+        self._refresh_connectors()
+        if hasattr(self, "_update_outline"):
+            self._update_outline()
+        self.op_label.setText("已裁透明边：%d×%d → %d×%d" % (img.width(), img.height(), x1 - x0, y1 - y0))
+
     def _place_asset(self, scene_pos: QtCore.QPointF, path: str):
         """素材拖到画布 drop 处：裁掉四周透明留白后建图层，使图居中落在 scene_pos（clamp 不越界）。"""
         img = QtGui.QImage(path)

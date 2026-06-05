@@ -396,6 +396,12 @@ class CanvasView(QtWidgets.QGraphicsView):
         tm.addAction("顺时针 90°").triggered.connect(lambda: ed._rotate_objects(90))
         tm.addAction("逆时针 90°").triggered.connect(lambda: ed._rotate_objects(270))
         m.addSeparator()
+        # 裁掉透明边：把当前图片层裁到真正的图（解决素材四周大方框）；不透明水印裁不掉，提示用裁剪工具
+        _act = getattr(ed, "active", None)
+        _is_raster = bool(_act and _act.get("kind") != "vector" and _act.get("image") is not None)
+        a_trim = m.addAction("✂ 裁掉透明边（裁到内容）"); a_trim.setEnabled(_is_raster)
+        a_trim.setToolTip("把当前图片层四周透明留白裁掉，使框=真正的图")
+        a_trim.triggered.connect(ed._trim_active_layer)
         a_del = m.addAction("删除图层"); a_del.setEnabled(has_layer)
         a_del.triggered.connect(ed._delete_active)
         m.exec(e.globalPos())

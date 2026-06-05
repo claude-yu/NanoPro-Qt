@@ -191,11 +191,17 @@ def mask_bbox(mask: np.ndarray):
 
 
 def content_bbox(rgba: np.ndarray, thr: int = 8):
-    """【不透明内容】(alpha>thr) 的紧致外接矩形 (x0,y0,x1,y1) 半开区间；全透明/无 alpha 返回 None。
-    用于让连接线锚到素材【真正的图】而非四周带透明留白的整张大框（对齐 BioRender 紧致图标）。"""
+    """【实心内容】的紧致外接矩形 (x0,y0,x1,y1) 半开区间；全透明/无 alpha 返回 None。
+    用于让连接线/裁剪锚到素材【真正的图】而非四周透明留白的整张大框（对齐 BioRender 紧致图标）。
+    自适应阈值：图里有明显实心内容(高 alpha)时，按其 ~22% 作阈值【忽略淡水印/柔光晕】（如 pngtree
+    满图淡水印）；整体偏淡的图则退回低阈值 thr，不至误裁。注意：【不透明】的水印文字(如「Designed by
+    pngtree」)本身就是实心内容，alpha 裁不掉——那种要用裁剪工具手动裁。"""
     if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
         return None
-    ys, xs = np.where(rgba[:, :, 3] > thr)
+    a = rgba[:, :, 3]
+    if a.size:
+        thr = max(thr, int(int(a.max()) * 0.22))  # 自适应：忽略远低于主体的淡水印
+    ys, xs = np.where(a > thr)
     if xs.size == 0:
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
