@@ -33,12 +33,53 @@ class ConnectorsMixin:
                 best = l
         return best
 
-    def _connector_rect(self, uid):
+    def _object_at_scene(self, pt: QtCore.QPointF):
+        """命中该 scene 点的【最上层可见对象】→ 返回 (layer, eidx)。
+        矢量层多元素时，eidx=命中的【具体元素】下标(导入SVG→连到单个元素而非整层)；栅格/单元素 eidx=None。
+        跳过铺满画布(≥95%)的背景层。无命中 → (None, None)。"""
+        cw, ch = self.canvas_size or (0, 0)
+        bg_area = 0.95 * cw * ch if (cw and ch) else None
+        best_l, best_e, best_z = None, None, None
+        for l in self.layers:
+            if not l.get("visible", True):
+                continue
+            if l.get("kind") == "vector":
+                for i, pair in enumerate(l.get("pairs", [])):
+                    it = pair[0]
+                    if it is None or it.scene() is None:
+                        continue
+                    r = it.sceneBoundingRect()
+                    if not r.contains(pt) or (bg_area and r.width() * r.height() >= bg_area):
+                        continue
+                    z = it.zValue()
+                    if best_z is None or z >= best_z:
+                        best_l, best_e, best_z = l, i, z
+            else:
+                it = l.get("item")
+                if it is None or it.scene() is None:
+                    continue
+                r = it.sceneBoundingRect()
+                if not r.contains(pt) or (bg_area and r.width() * r.height() >= bg_area):
+                    continue
+                z = it.zValue()
+                if best_z is None or z >= best_z:
+                    best_l, best_e, best_z = l, None, z
+        return best_l, best_e
+
+    def _connector_rect(self, uid, eidx=None):
         """连接线端点对象的当前外框（scene 坐标）；对象已删/脱离场景 → None（连接线据此自删）。
-        用【不透明内容】的紧致框（去掉素材四周透明留白）→ 箭头指到真正的图、不指空白大框（仿 BioRender 紧致图标）。"""
+        eidx 非 None 且为矢量层 → 用该层【第 eidx 个元素】的框（元素级连接，导入SVG连到单个元素）。
+        否则用整层；栅格层用【不透明内容】紧致框（去素材四周透明留白）。"""
         lyr = next((l for l in self.layers if l.get("uid") == uid), None)
         if lyr is None:
             return None
+        if eidx is not None and lyr.get("kind") == "vector":
+            pairs = lyr.get("pairs", [])
+            if 0 <= eidx < len(pairs):
+                eit = pairs[eidx][0]
+                if eit is not None and eit.scene() is not None:
+                    return eit.sceneBoundingRect()
+            # eidx 失效(元素被删/重排) → 回退整层框
         it = lyr.get("item")
         if it is None or it.scene() is None:
             return None
@@ -81,36 +122,46 @@ class ConnectorsMixin:
                     self.scene.removeItem(c)
                 self.connectors.remove(c)
 
+    def _connector_under(self, pt: QtCore.QPointF) -> bool:
+        """该 scene 点(带容差)下是否有已存在的连接线 → 用于悬停在连线上时不显示后面对象的锚点。"""
+        if not getattr(self, "connectors", None):
+            return False
+        tol = 7.0 / max(1e-6, self.view.current_zoom())
+        rect = QtCore.QRectF(pt.x() - tol, pt.y() - tol, 2 * tol, 2 * tol)
+        return any(it in self.connectors for it in self.scene.items(rect))
+
     def _on_connector_hover(self, scene_pos):
-        """连接线工具悬停：命中对象 → 算它 4 个边中点锚点存 self._conn_hover_anchors（drawForeground 画蓝点）；
-        没命中 → 清空。让用户像 BioRender 一样看到能连到哪、连在边的正中。
-        性能：光标几乎没动(<6px)直接返回，避免每帧都遍历所有图层(大画布/多层时卡)。"""
+        """连接线工具悬停：命中对象 → 算它 4 个边中点锚点存 self._conn_hover_anchors（drawForeground 画蓝点）。
+        多元素矢量层(导入SVG)→ 只显光标下那个【元素】的锚点；悬停在已有连线上 → 不显示后面对象锚点。
+        性能：光标几乎没动(<6px)直接返回，避免每帧都遍历(大画布/多层卡)。"""
         last = getattr(self, "_conn_hover_last", None)
         if last is not None and (scene_pos - last).manhattanLength() < 6.0:
             return
         self._conn_hover_last = QtCore.QPointF(scene_pos)
         import connector_item
-        lyr = self._layer_at_scene(scene_pos)
-        uid = lyr.get("uid") if lyr is not None else None
         anchors = []
-        if lyr is not None:
-            r = self._connector_rect(uid)
-            if r is not None:
-                anchors = connector_item.anchor_points(r)
-        if uid != getattr(self, "_conn_hover_uid", None) or anchors != getattr(self, "_conn_hover_anchors", []):
-            self._conn_hover_uid = uid
+        key = None
+        if not self._connector_under(scene_pos):  # ② 悬停在已有连线上 → 不显后面对象锚点
+            lyr, eidx = self._object_at_scene(scene_pos)
+            if lyr is not None:
+                r = self._connector_rect(lyr.get("uid"), eidx)
+                if r is not None:
+                    anchors = connector_item.anchor_points(r)
+                    key = (lyr.get("uid"), eidx)
+        if key != getattr(self, "_conn_hover_key", None) or anchors != getattr(self, "_conn_hover_anchors", []):
+            self._conn_hover_key = key
             self._conn_hover_anchors = anchors
             self.view.viewport().update()
 
     def _clear_connector_hover(self):
-        self._conn_hover_uid = None
+        self._conn_hover_key = None
         self._conn_hover_last = None
         if getattr(self, "_conn_hover_anchors", None):
             self._conn_hover_anchors = []
             self.view.viewport().update()
 
     def _connector_start(self, sp: QtCore.QPointF):
-        self._conn_src = self._layer_at_scene(sp)
+        self._conn_src, self._conn_src_eidx = self._object_at_scene(sp)
         self._conn_p0 = sp
         self._conn_p1 = sp
         self._start_preview()
@@ -135,15 +186,16 @@ class ConnectorsMixin:
         if p0 is None:
             return
         src = getattr(self, "_conn_src", None)
-        self._conn_src = None
-        dst = self._layer_at_scene(getattr(self, "_conn_p1", p0))
+        src_e = getattr(self, "_conn_src_eidx", None)
+        self._conn_src = None; self._conn_src_eidx = None
+        dst, dst_e = self._object_at_scene(getattr(self, "_conn_p1", p0))
         if src is None or dst is None:
             self.op_label.setText("连接线未建立：起点和终点都要落在一个对象上"); return
-        if src is dst:
+        if src is dst and src_e == dst_e:  # 同一对象/同一元素 → 不连（但同层【不同元素】允许，支持SVG内部连接）
             self.op_label.setText("连接线未建立：起点和终点是同一个对象"); return
         import connector_item
         self._push_history("连接线")
-        c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"))
+        c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"), src_eidx=src_e, dst_eidx=dst_e)
         self.scene.addItem(c)
         self.connectors.append(c)
         if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud

@@ -105,11 +105,14 @@ def build_connector_path(p1: QtCore.QPointF, p2: QtCore.QPointF,
 class ConnectorItem(QtWidgets.QGraphicsPathItem):
     """连接线图元：存两端图层 uid + 形状/颜色/虚线/线宽；update_path() 按两对象当前外框重算并跟随。"""
 
-    def __init__(self, editor, src_uid, dst_uid, color="#333333", width: float = 2.0, shape: str = "straight"):
+    def __init__(self, editor, src_uid, dst_uid, color="#333333", width: float = 2.0, shape: str = "straight",
+                 src_eidx=None, dst_eidx=None):
         super().__init__()
         self._editor = editor
         self.src_uid = src_uid
         self.dst_uid = dst_uid
+        self.src_eidx = src_eidx   # 矢量层内【具体元素】下标（多元素层/导入SVG 用）；None=整层/栅格
+        self.dst_eidx = dst_eidx
         self.kind = "connector"
         self.line_shape = shape   # 注意：不能叫 self.shape——会覆盖 QGraphicsItem.shape() 碰撞检测方法
         self.dashed = False
@@ -142,8 +145,8 @@ class ConnectorItem(QtWidgets.QGraphicsPathItem):
 
     def update_path(self) -> bool:
         """按两端对象当前外框重算路径。端点对象已不存在 → 返回 False（调用方删除本连接线）。"""
-        ra = self._editor._connector_rect(self.src_uid)
-        rb = self._editor._connector_rect(self.dst_uid)
+        ra = self._editor._connector_rect(self.src_uid, self.src_eidx)
+        rb = self._editor._connector_rect(self.dst_uid, self.dst_eidx)
         if ra is None or rb is None:
             return False
         p1 = edge_anchor(ra, rb.center())  # 落在 A 朝向 B 的那条边的【正中】
