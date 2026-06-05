@@ -37,6 +37,18 @@ from ruler_widget import RULER_THICK, RulerWidget
 
 DEFAULT_CANVAS = (2000, 1400)
 HISTORY_CAP = 15  # 撤销步数上限（每步复制各层图像，过多会吃内存）
+
+
+def app_icon_path():
+    """NanoPro.ico 的绝对路径（开发=仓库根；打包=_MEIPASS 根，需在 spec datas 里带上）；缺失返回 None。"""
+    import sys
+    base = getattr(sys, "_MEIPASS", None) if getattr(sys, "frozen", False) else \
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if base:
+        p = os.path.join(base, "NanoPro.ico")
+        if os.path.exists(p):
+            return p
+    return None
 LAYOUT_VERSION = 7  # 面板布局存档版本；改这个数会让旧存档失效、回到默认停靠（v5: 右面板加最小宽+合理初始宽+布局记忆迁 ~/.sciedit/layout.json；v6: 新增「历史记录」停靠面板；v7: 新增「矢量属性」停靠面板，作废旧存档以免新面板被旧 dock_state 隐藏）
 CANVAS_PRESETS = [  # 新建空白预设
     ("1K  1024×1024", (1024, 1024)),
@@ -463,7 +475,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
     def __init__(self):
         super().__init__()
         EditorWindow._windows.append(self)
-        self.setWindowTitle("SciEdit (Qt 原型) · 性能验证")
+        self.setWindowTitle("SciEdit 科研图编辑器")
+        _ic = app_icon_path()  # 任务栏/标题栏图标
+        if _ic:
+            self.setWindowIcon(QtGui.QIcon(_ic))
         self.resize(1360, 860)
         self.scene = QtWidgets.QGraphicsScene(self)
         self.view = CanvasView(self.scene, self)

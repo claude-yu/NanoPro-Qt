@@ -6,16 +6,20 @@
 """
 import sys
 
-from PySide6 import QtWidgets
+from PySide6 import QtGui, QtWidgets
 
 import theme
-from editor_window import EditorWindow
+from editor_window import EditorWindow, app_icon_path
 
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
     app.setOrganizationName("NanoPro")
-    app.setApplicationName("SciEditQt")
+    app.setApplicationName("SciEdit")
+    app.setApplicationDisplayName("SciEdit 科研图编辑器")
+    _ic = app_icon_path()  # 应用级图标（任务栏/Alt-Tab 兜底）
+    if _ic:
+        app.setWindowIcon(QtGui.QIcon(_ic))
     theme.apply(app, theme.load_saved("light"))  # 首次默认浅色，之后用记忆的
     win = EditorWindow()
     win.show()

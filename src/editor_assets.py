@@ -22,6 +22,28 @@ import config
 import image_ops
 
 
+class _AssetScanSignals(QtCore.QObject):
+    done = QtCore.Signal(int, object, object, object)  # gen, node, all_items, err
+
+
+class _AssetScanTask(QtCore.QRunnable):
+    """后台线程里扫描素材根目录（asset_lib.scan_asset_tree 是纯文件 I/O，线程安全），
+    扫完发信号回主线程填树——避免上万素材的目录遍历卡死启动（实测 20 万文件约 9s）。"""
+
+    def __init__(self, gen: int, root: str, signals: "_AssetScanSignals"):
+        super().__init__()
+        self._gen = gen
+        self._root = root
+        self._signals = signals
+
+    def run(self):
+        try:
+            node, all_items, err = asset_lib.scan_asset_tree(self._root)
+        except Exception as e:  # 大声失败：异常也回主线程提示，不静默吞
+            node, all_items, err = None, [], "扫描失败：%s" % e
+        self._signals.done.emit(self._gen, node, all_items, err)
+
+
 class AssetsMixin:
     # ---------- 素材库 ----------
     def add_to_assets(self):
@@ -150,20 +172,40 @@ class AssetsMixin:
         self._load_asset_dir()
 
     def _load_asset_dir(self):
-        """按已记住的素材目录扫描成【分类树】填进 asset_tree；无目录则清空。大声失败：无图时提示。"""
+        """按已记住的素材目录【后台线程】扫描成分类树 → 窗口秒开，不卡（上万素材的遍历放工作线程）。
+        扫描期间树里显「正在加载…」，扫完由 _on_asset_dir_scanned 在主线程填充。"""
         root = config.get_asset_dir()
         self.asset_tree.clear()
         self.asset_fs_list.clear()
         self._asset_cur_items = []; self._asset_all_items = []
+        # 代际计数：扫描进行中又换目录 → 旧结果回来时 gen 不匹配，丢弃（防竞态覆盖）
+        self._asset_scan_gen = getattr(self, "_asset_scan_gen", 0) + 1
         if not root:
             return
-        node, all_items, err = asset_lib.scan_asset_tree(root)
+        busy = QtWidgets.QTreeWidgetItem(["⏳ 正在加载素材库…"])
+        busy.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)  # 占位，不可点
+        self.asset_tree.addTopLevelItem(busy)
+        self.op_label.setText("素材库加载中…（大库首次扫描需几秒，不影响其它操作）")
+        if not hasattr(self, "_asset_scan_sig"):
+            self._asset_scan_sig = _AssetScanSignals()
+            self._asset_scan_sig.done.connect(self._on_asset_dir_scanned)
+        QtCore.QThreadPool.globalInstance().start(
+            _AssetScanTask(self._asset_scan_gen, root, self._asset_scan_sig))
+
+    def _on_asset_dir_scanned(self, gen, node, all_items, err):
+        """后台扫描完成（主线程）：gen 过期则丢弃；否则填分类树 + 选根节点显图。"""
+        if gen != getattr(self, "_asset_scan_gen", 0):
+            return  # 已被更新的一次加载取代，丢弃旧结果
+        self.asset_tree.clear()
         if err:
             self.op_label.setText("素材库：%s" % err)
             return
+        if node is None:
+            self.op_label.setText("素材库：该文件夹下没有图片素材")
+            return
         self._asset_all_items = all_items
         self._populate_asset_tree(node)
-        top = self.asset_tree.topLevelItem(0)  # 默认选根节点 → 显其直属图（分类在子节点里点开）
+        top = self.asset_tree.topLevelItem(0)
         if top is not None:
             self.asset_tree.setCurrentItem(top)
             self._asset_cur_items = top.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
