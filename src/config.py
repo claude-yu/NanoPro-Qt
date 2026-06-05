@@ -242,6 +242,63 @@ def set_asset_dir(path) -> bool:
     return _save_config(cfg)
 
 
+def get_asset_thumb_size(default: int = 140) -> int:
+    """素材库缩略图大小（滑块值，持久化，下次打开保持）。非敏感。"""
+    cfg = _load_config()
+    try:
+        v = int(cfg.get("asset_thumb_size", default))
+        return max(48, min(320, v))
+    except Exception:
+        return default
+
+
+def set_asset_thumb_size(px) -> bool:
+    cfg = _load_config()
+    cfg["asset_thumb_size"] = int(px)
+    return _save_config(cfg)
+
+
+def get_asset_favorites() -> list:
+    """收藏的素材绝对路径列表（仅当前仍存在的文件）。非敏感。"""
+    cfg = _load_config()
+    out = [str(p) for p in cfg.get("asset_favorites", []) if p and Path(str(p)).is_file()]
+    return out
+
+
+def toggle_asset_favorite(path) -> bool:
+    """切换某素材的收藏状态；返回切换后【是否已收藏】。"""
+    if not path:
+        return False
+    cfg = _load_config()
+    favs = [str(p) for p in cfg.get("asset_favorites", [])]
+    s = str(path)
+    if s in favs:
+        favs.remove(s); now = False
+    else:
+        favs.append(s); now = True
+    cfg["asset_favorites"] = favs[:500]
+    _save_config(cfg)
+    return now
+
+
+def push_asset_recent(path, cap: int = 60) -> bool:
+    """把刚用过的素材记入「最近使用」(LRU，最新在前，去重，封顶 cap)。非敏感。"""
+    if not path:
+        return False
+    cfg = _load_config()
+    s = str(path)
+    rec = [str(p) for p in cfg.get("asset_recent", []) if str(p) != s]
+    rec.insert(0, s)
+    cfg["asset_recent"] = rec[:cap]
+    return _save_config(cfg)
+
+
+def get_asset_recent() -> list:
+    """最近使用的素材绝对路径列表（最新在前，仅当前仍存在的文件）。"""
+    cfg = _load_config()
+    return [str(p) for p in cfg.get("asset_recent", []) if p and Path(str(p)).is_file()]
+
+
 def get_pdf_converter():
     """返回用户指定的 PDF→SVG 转换器 exe 路径（pdftocairo/pdf2svg/inkscape/mutool 之一）；未设或失效返回 None。
     非敏感（仅本机工具路径）。未设时 pdf_import 会自动在 PATH 上探测。"""

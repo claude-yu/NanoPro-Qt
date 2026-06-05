@@ -128,7 +128,45 @@ class LayerRow(QtWidgets.QWidget):
             ed, layer = self._editor, self._layer
             QtCore.QTimer.singleShot(0, lambda: ed._load_layer_as_selection(layer, mode))  # 延后执行：避免在本行事件里 _refresh_layers 销毁自身
             e.accept(); return
+        # 普通左键：本行接管（setItemWidget 让列表收不到 press，原生拖拽失效）→ 先选中本行 + 记录拖拽起点。
+        # Shift（范围多选）交回列表默认逻辑。
+        if e.button() == QtCore.Qt.MouseButton.LeftButton and not (mods & QtCore.Qt.KeyboardModifier.ShiftModifier):
+            self._select_self()
+            self._press_pos = e.position().toPoint()
+            e.accept(); return
+        self._press_pos = None
         super().mousePressEvent(e)
+
+    def _select_self(self):
+        """把本行设为列表当前项（触发 currentRowChanged → _on_layer_row 激活该层）。"""
+        lst = self._editor.layer_list
+        for i in range(lst.count()):
+            if lst.itemWidget(lst.item(i)) is self:
+                lst.setCurrentItem(lst.item(i)); break
+
+    def mouseMoveEvent(self, e):
+        # 左键按住并拖过阈值 → 行内自起 QDrag 做图层重排（弥补 setItemWidget 吞掉的列表原生拖拽）
+        if (e.buttons() & QtCore.Qt.MouseButton.LeftButton) and getattr(self, "_press_pos", None) is not None:
+            if (e.position().toPoint() - self._press_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                self._press_pos = None
+                self._start_layer_drag()
+                return
+        super().mouseMoveEvent(e)
+
+    def _start_layer_drag(self):
+        lst = self._editor.layer_list
+        uid = self._layer.get("uid")
+        if uid is None:
+            return
+        lst._drag_uid = uid  # dropEvent 用它定位源行（最稳，不靠 currentItem）
+        md = QtCore.QMimeData()
+        md.setData(lst.LAYER_MIME, str(uid).encode("utf-8"))  # 让列表 dragEnter/Move 放行本次拖拽
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(md)
+        pm = self.grab()  # 拖拽影像=本行外观（像 PS 拖着一行走）
+        drag.setPixmap(pm)
+        drag.setHotSpot(QtCore.QPoint(20, pm.height() // 2))
+        drag.exec(QtCore.Qt.DropAction.MoveAction)
 
     def contextMenuEvent(self, e):
         # 右键菜单：上移/下移层级、勾选打组、重命名、删除（行内按钮收进这里，对齐 PS 靠拖拽+底栏）
@@ -361,17 +399,33 @@ class DragLayerList(QtWidgets.QListWidget):
     重写 dropEvent：不调 super().dropEvent，改回调 editor._reorder_layer(src_uid, dst_uid, before) 重排
     self.layers + 重设 zValue + 入撤销 + _refresh_layers。"""
 
+    LAYER_MIME = "application/x-nanopro-layer"  # 行内自起的图层重排拖拽标识
+
     def __init__(self, editor):
         super().__init__()
         self._editor = editor
         self._drag_uid = None  # 拖拽起手记下被拖行的 uid（不靠 currentItem，避免 _refresh_layers 重建后失准）
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
+        self.setAcceptDrops(True)
 
     def startDrag(self, actions):
         it = self.itemAt(self.mapFromGlobal(QtGui.QCursor.pos())) or self.currentItem()
         self._drag_uid = it.data(QtCore.Qt.ItemDataRole.UserRole) if it is not None else None
         super().startDrag(actions)
+
+    def dragEnterEvent(self, e):
+        # setItemWidget(LayerRow) 会吞掉列表自带拖拽 → 改由 LayerRow 自起 QDrag(带本格式)；这里放行它
+        if e.mimeData().hasFormat(self.LAYER_MIME):
+            e.setDropAction(QtCore.Qt.DropAction.MoveAction); e.accept()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat(self.LAYER_MIME):
+            e.setDropAction(QtCore.Qt.DropAction.MoveAction); e.accept()  # 显示放置指示并允许 drop
+        else:
+            super().dragMoveEvent(e)
 
     def dropEvent(self, e):
         pos = e.position().toPoint()
@@ -1499,14 +1553,15 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.asset_fs_count = QtWidgets.QLabel(""); self.asset_fs_count.setObjectName("hint")
         _srow.addWidget(self.asset_fs_count)
         al.addLayout(_srow)
-        # —— 缩略图大小滑块（BioRender 式：用户自己拖大/拖小，直接解决“图标太小看不清”）——
-        self._asset_thumb = 140  # 默认放大到 140（比 96 明显大、看得清）
+        # —— 缩略图大小滑块（BioRender 式：用户自己拖大/拖小，直接解决“图标太小看不清”；大小持久化）——
+        self._asset_thumb = config.get_asset_thumb_size(140)  # 读回上次记住的大小（默认 140）
         _zrow = QtWidgets.QHBoxLayout()
         _zrow.addWidget(self._hint("缩略图大小"))
         self.asset_zoom = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self.asset_zoom.setRange(72, 240); self.asset_zoom.setValue(self._asset_thumb)
-        self.asset_zoom.setToolTip("拖动调整素材缩略图大小（看不清就拖大）")
+        self.asset_zoom.setToolTip("拖动调整素材缩略图大小（看不清就拖大）·会被记住，下次打开保持")
         self.asset_zoom.valueChanged.connect(self._on_asset_thumb_size)
+        self.asset_zoom.sliderReleased.connect(lambda: config.set_asset_thumb_size(self._asset_thumb))  # 松手才存盘，不刷爆
         _zrow.addWidget(self.asset_zoom, 1)
         al.addLayout(_zrow)
         self.asset_fs_list = AssetListWidget()
@@ -1523,6 +1578,8 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.asset_fs_list.setBatchSize(200)
         self.asset_fs_list.setDragEnabled(True)
         self.asset_fs_list.itemClicked.connect(self._fs_asset_clicked)  # 单击=放到画布中央（拖动=放到指定位置）
+        self.asset_fs_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键：放画布/收藏/拆分/定位
+        self.asset_fs_list.customContextMenuRequested.connect(self._fs_asset_menu)
         self.asset_fs_list.setSpacing(4); self.asset_fs_list.setMinimumHeight(110)
         self._thumb_timer = QtCore.QTimer(self); self._thumb_timer.setSingleShot(True); self._thumb_timer.setInterval(60)
         self._thumb_timer.timeout.connect(self._lazy_decode_asset_thumbs)  # 滚动去抖 → 只解码可见缩略图
@@ -6233,8 +6290,11 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._refresh_asset_thumbs()
         self.op_label.setText("素材库：%d 张，已按文件夹分类（点分类树浏览/搜索）" % len(all_items))
 
+    _ASSET_MARK = QtCore.Qt.ItemDataRole.UserRole + 1  # 树节点角色：标记「收藏/最近」虚拟分类
+
     def _populate_asset_tree(self, node):
-        """扫描树 → QTreeWidget。item 文本=「名（直属N）」，data 存该节点【直属】items。"""
+        """扫描树 → QTreeWidget。item 文本=「名（直属N）」，data 存该节点【直属】items。
+        顶部加「⭐收藏 / 🕘最近使用」虚拟分类（点击时实时从 config 取，永远最新）。"""
         def add(parent, nd):
             label = "%s（%d）" % (nd["name"], len(nd["items"])) if nd["items"] else nd["name"]
             it = QtWidgets.QTreeWidgetItem([label])
@@ -6243,11 +6303,25 @@ class EditorWindow(QtWidgets.QMainWindow):
             for ch in nd["children"]:
                 add(it, ch)
             return it
+        fav = QtWidgets.QTreeWidgetItem(["⭐ 收藏"]); fav.setData(0, self._ASSET_MARK, "fav")
+        rec = QtWidgets.QTreeWidgetItem(["🕘 最近使用"]); rec.setData(0, self._ASSET_MARK, "recent")
+        self.asset_tree.addTopLevelItem(fav); self.asset_tree.addTopLevelItem(rec)
         add(None, node).setExpanded(True)  # 根展开，露出一级分类
 
+    def _items_from_paths(self, paths):
+        import os
+        return [{"file": os.path.basename(p), "path": p} for p in paths]
+
     def _on_asset_tree_click(self, item, _col=0):
-        """点分类 → 只加载它的【直属】图（不递归）→ 每次只显几十张，海量库不卡。"""
-        self._asset_cur_items = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
+        """点分类 → 只加载它的【直属】图（不递归）→ 每次只显几十张，海量库不卡。
+        点「收藏/最近」虚拟分类 → 实时从 config 取对应素材。"""
+        mark = item.data(0, self._ASSET_MARK)
+        if mark == "fav":
+            self._asset_cur_items = self._items_from_paths(config.get_asset_favorites())
+        elif mark == "recent":
+            self._asset_cur_items = self._items_from_paths(config.get_asset_recent())
+        else:
+            self._asset_cur_items = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
         self.asset_search.blockSignals(True); self.asset_search.clear(); self.asset_search.blockSignals(False)
         self._asset_filter = ""
         self._refresh_asset_thumbs()
@@ -6374,8 +6448,9 @@ class EditorWindow(QtWidgets.QMainWindow):
         lst.setUpdatesEnabled(False)
         lst.clear()
         flt = getattr(self, "_asset_filter", "")
-        if flt:
-            items = [it for it in self._asset_all_items if flt in it["file"].lower()]
+        if flt:  # 搜索：文件名 + 路径(含分类文件夹名)都匹配 → 输入分类名也能搜出来
+            items = [it for it in self._asset_all_items
+                     if flt in it["file"].lower() or flt in it["path"].lower()]
         else:
             items = list(self._asset_cur_items or [])
         total = len(items)
@@ -6383,9 +6458,13 @@ class EditorWindow(QtWidgets.QMainWindow):
         capped = total > CAP
         if capped:
             items = items[:CAP]
+        favs = set(config.get_asset_favorites())  # 收藏的置顶标星
         for it in items:
             lw = QtWidgets.QListWidgetItem()  # 不解码 icon，只挂路径(拖拽/单击用)+提示
-            lw.setToolTip(it["file"])
+            star = "⭐ " if it["path"] in favs else ""
+            # 悬停大图预览：HTML tooltip 内嵌原图(宽240) + 文件名 → 鼠标停上去就看清是什么
+            lw.setToolTip("%s<img src='file:///%s' width='240'><br>%s"
+                          % (star, it["path"].replace("\\", "/"), it["file"]))
             lw.setData(QtCore.Qt.ItemDataRole.UserRole, it["path"])
             lst.addItem(lw)
         lst.setUpdatesEnabled(True)
@@ -6467,11 +6546,16 @@ class EditorWindow(QtWidgets.QMainWindow):
         else:
             cw, ch = self.canvas_size
             layer = self._add_layer(img, "素材", "image")
-            x = max(0.0, min(scene_pos.x() - img.width() / 2, max(0.0, cw - img.width())))
-            y = max(0.0, min(scene_pos.y() - img.height() / 2, max(0.0, ch - img.height())))
+            # 智能缩放：大素材缩到 ≤85% 画布（只缩不放），避免铺满/超框；落点居中在 drop 处并双向 clamp（像 PS/BioRender）
+            scale = min(cw * 0.85 / max(1, img.width()), ch * 0.85 / max(1, img.height()), 1.0)
+            sw, sh = img.width() * scale, img.height() * scale
+            x = max(0.0, min(scene_pos.x() - sw / 2, max(0.0, cw - sw)))
+            y = max(0.0, min(scene_pos.y() - sh / 2, max(0.0, ch - sh)))
             self._suspend_history = True
+            layer["item"].setScale(scale)
             layer["item"].setPos(x, y)
             self._suspend_history = False
+        config.push_asset_recent(path)  # 记入「最近使用」
         self.set_tool("move"); self.fit_view(); self._update_info()
 
     def _fs_asset_clicked(self, item):
@@ -6482,6 +6566,65 @@ class EditorWindow(QtWidgets.QMainWindow):
         cs = self.canvas_size  # 空画布时为 None：_place_asset 会按图尺寸初始化、忽略此处坐标
         center = QtCore.QPointF(cs[0] / 2, cs[1] / 2) if cs else QtCore.QPointF(0, 0)
         self._place_asset(center, path)
+
+    def _fs_asset_menu(self, pos):
+        """本地素材右键菜单：放画布 / 收藏 / 拆分此合集 / 在资源管理器显示 / 复制路径。"""
+        it = self.asset_fs_list.itemAt(pos)
+        if it is None:
+            return
+        path = it.data(QtCore.Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        is_fav = path in set(config.get_asset_favorites())
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("放到画布中央", lambda: self._fs_asset_clicked(it))
+        menu.addAction("取消收藏 ⭐" if is_fav else "收藏 ⭐", lambda: self._toggle_fs_favorite(path))
+        menu.addSeparator()
+        menu.addAction("✂ 拆分此合集为单个图标…", lambda: self._split_one_montage(path))
+        menu.addAction("在资源管理器中显示", lambda: self._reveal_in_explorer(path))
+        menu.addAction("复制文件路径", lambda: QtWidgets.QApplication.clipboard().setText(str(path)))
+        menu.exec(self.asset_fs_list.mapToGlobal(pos))
+
+    def _toggle_fs_favorite(self, path):
+        now = config.toggle_asset_favorite(path)
+        self.op_label.setText(("已收藏 ⭐ " if now else "已取消收藏 ") + os.path.basename(path))
+        self._refresh_asset_thumbs()  # 刷新星标显示
+
+    def _reveal_in_explorer(self, path):
+        import subprocess
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        except Exception as e:
+            self.op_label.setText("无法打开资源管理器：%s" % e)
+
+    def _split_one_montage(self, path):
+        """拆分单张合集图 → 存到同目录的 <stem>_拆分/ 子文件夹，完成后重扫露出新子分类。"""
+        qi = QtGui.QImage(path)
+        if qi.isNull():
+            QtWidgets.QMessageBox.information(self, "拆分合集", "无法读取该图")
+            return
+        qi = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+        boxes = image_ops.split_montage(image_ops.qimage_to_rgba(qi))
+        if len(boxes) <= 1:
+            QtWidgets.QMessageBox.information(self, "拆分合集", "这张图切不出多个图标（可能本就是单个图标，无需拆分）")
+            return
+        stem = os.path.splitext(os.path.basename(path))[0]
+        out = os.path.join(os.path.dirname(path), stem + "_拆分")
+        try:
+            os.makedirs(out, exist_ok=True)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "拆分合集", "无法创建输出文件夹：%s" % e)
+            return
+        n = 0
+        for idx, (x, y, w, h) in enumerate(boxes):
+            if qi.copy(int(x), int(y), int(w), int(h)).save(os.path.join(out, "%s_%02d.png" % (stem, idx + 1)), "PNG"):
+                n += 1
+        QtWidgets.QMessageBox.information(
+            self, "拆分合集", "已把这张合集拆成 %d 个单个图标 →\n%s\n\n（分类树里会出现「%s_拆分」子分类）" % (n, out, stem))
+        self._load_asset_dir()  # 重扫，露出新子文件夹
 
     def copy_to_clipboard(self):
         """复制当前激活图层为图片到系统剪贴板（可 Ctrl+V 粘回，或粘到外部应用）。"""
