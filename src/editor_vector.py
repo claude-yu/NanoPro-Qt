@@ -1399,8 +1399,10 @@ class VectorMixin:
         return qp
 
     def _shape_start(self, sp: QtCore.QPointF):
+        self._shape_anchor_src = None
         if self.view._tool in ("sh_arrow", "sh_line"):  # 箭头/直线起点吸附到对象边中点(基础箭头也连边中心)
             sp = self._snap_to_anchor(sp)
+            self._shape_anchor_src = self._anchor_object_at(sp)  # 起点落在某对象锚点上 → 记下,供两端都中时建跟随连线
         self._shape_p0 = sp; self._shape_p1 = sp
         self._start_preview()
 
@@ -1421,7 +1423,18 @@ class VectorMixin:
         tool = self.view._tool
         constrain = bool(QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
         if QtCore.QLineF(p0, p1).length() < 3:  # 太小=误点，忽略
+            self._shape_anchor_src = None
             return
+        # 箭头/直线【两端都吸在对象锚点上】→ 建跟随式连接线（移动自动跟随，像 BioRender），不画静态形状
+        if tool in ("sh_arrow", "sh_line"):
+            src = getattr(self, "_shape_anchor_src", None)
+            dst = self._anchor_object_at(p1)
+            self._shape_anchor_src = None
+            if src and dst and not (src[0] is dst[0] and src[1] == dst[1]):
+                if self._create_connector(src[0], src[1], dst[0], dst[1], arrow=(tool == "sh_arrow")) is not None:
+                    self.op_label.setText("✓ 已建跟随式%s（连在边中心·移动自动跟随·右键改形状/颜色/删除）"
+                                          % ("箭头" if tool == "sh_arrow" else "连线"))
+                    return  # 两端绑定 → 不再落地静态形状
         qp = self._shape_path(tool, p0, p1, constrain)
         nm = self._SHAPE_NAMES.get(tool, "形状")
         fill = "#333333" if tool == "sh_arrow" else None  # 箭头三角形实心；矩形/椭圆/线=描边轮廓

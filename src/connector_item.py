@@ -72,9 +72,11 @@ def _elbow_knee(p1: QtCore.QPointF, p2: QtCore.QPointF) -> QtCore.QPointF:
 
 
 def build_connector_path(p1: QtCore.QPointF, p2: QtCore.QPointF,
-                         shape: str = "straight", arrow: float = 13.0) -> QtGui.QPainterPath:
+                         shape: str = "straight", arrow: float = 13.0,
+                         with_arrow: bool = True) -> QtGui.QPainterPath:
     """按形状构造 p1→p2 连线 + p2 端实心箭头，烘焙进一条 QPainterPath（scene 坐标）。
-    shape: straight 直线 / curved 平滑曲线（中点法向外凸）/ elbow 直角折线。箭头沿末端切线。"""
+    shape: straight 直线 / curved 平滑曲线（中点法向外凸）/ elbow 直角折线。箭头沿末端切线。
+    with_arrow=False：不画箭头（直线连接线用）。"""
     qp = QtGui.QPainterPath()
     if shape == "curved":
         mid = QtCore.QPointF((p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0)
@@ -88,17 +90,20 @@ def build_connector_path(p1: QtCore.QPointF, p2: QtCore.QPointF,
             ctrl = mid
         qp.moveTo(p1)
         qp.quadTo(ctrl, p2)
-        _arrow_head(qp, p2, ctrl, arrow)             # 箭头沿曲线末端切线（指向 ctrl）
+        if with_arrow:
+            _arrow_head(qp, p2, ctrl, arrow)         # 箭头沿曲线末端切线（指向 ctrl）
     elif shape == "elbow":
         knee = _elbow_knee(p1, p2)
         qp.moveTo(p1)
         qp.lineTo(knee)
         qp.lineTo(p2)
-        _arrow_head(qp, p2, knee, arrow)             # 箭头沿最后一段方向
+        if with_arrow:
+            _arrow_head(qp, p2, knee, arrow)         # 箭头沿最后一段方向
     else:  # straight
         qp.moveTo(p1)
         qp.lineTo(p2)
-        _arrow_head(qp, p2, p1, arrow)
+        if with_arrow:
+            _arrow_head(qp, p2, p1, arrow)
     return qp
 
 
@@ -106,13 +111,14 @@ class ConnectorItem(QtWidgets.QGraphicsPathItem):
     """连接线图元：存两端图层 uid + 形状/颜色/虚线/线宽；update_path() 按两对象当前外框重算并跟随。"""
 
     def __init__(self, editor, src_uid, dst_uid, color="#333333", width: float = 2.0, shape: str = "straight",
-                 src_eidx=None, dst_eidx=None):
+                 src_eidx=None, dst_eidx=None, arrow: bool = True):
         super().__init__()
         self._editor = editor
         self.src_uid = src_uid
         self.dst_uid = dst_uid
         self.src_eidx = src_eidx   # 矢量层内【具体元素】下标（多元素层/导入SVG 用）；None=整层/栅格
         self.dst_eidx = dst_eidx
+        self.arrow = arrow         # 末端是否画箭头（箭头连线=True / 直线连线=False）
         self.kind = "connector"
         self.line_shape = shape   # 注意：不能叫 self.shape——会覆盖 QGraphicsItem.shape() 碰撞检测方法
         self.dashed = False
@@ -151,5 +157,5 @@ class ConnectorItem(QtWidgets.QGraphicsPathItem):
             return False
         p1 = edge_anchor(ra, rb.center())  # 落在 A 朝向 B 的那条边的【正中】
         p2 = edge_anchor(rb, ra.center())  # 落在 B 朝向 A 的那条边的【正中】
-        self.setPath(build_connector_path(p1, p2, self.line_shape))
+        self.setPath(build_connector_path(p1, p2, self.line_shape, with_arrow=self.arrow))
         return True

@@ -130,6 +130,36 @@ class ConnectorsMixin:
                 bestd, best = d, a
         return best if best is not None else scene_pos
 
+    def _anchor_object_at(self, scene_pos: QtCore.QPointF, tol_px: float = 12.0):
+        """scene_pos 在某对象边中点锚点容差(屏幕<tol_px)内 → 返回 (layer, eidx)；否则 None。
+        用于判断箭头/直线端点是否落在了某对象的锚点上（落上→建跟随式连接线）。"""
+        lyr, eidx = self._object_at_scene(scene_pos)
+        if lyr is None:
+            return None
+        r = self._connector_rect(lyr.get("uid"), eidx)
+        if r is None:
+            return None
+        import connector_item
+        tol = tol_px / max(1e-6, self.view.current_zoom())
+        for a in connector_item.anchor_points(r):
+            if (a - scene_pos).manhattanLength() <= tol:
+                return (lyr, eidx)
+        return None
+
+    def _create_connector(self, src, src_e, dst, dst_e, arrow: bool = True, label: str = "连接线"):
+        """从两个对象 (layer,eidx) 建一条【跟随式】连接线；成功返回 ConnectorItem，失败返回 None。
+        连接线工具 + 锚定的箭头/直线共用这条管线（箭头 arrow=True、直线 arrow=False）。"""
+        import connector_item
+        self._push_history(label)
+        c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"),
+                                         src_eidx=src_e, dst_eidx=dst_e, arrow=arrow)
+        self.scene.addItem(c)
+        self.connectors.append(c)
+        if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
+            self.scene.removeItem(c); self.connectors.remove(c)
+            return None
+        return c
+
     def _refresh_connectors(self):
         """重算所有连接线端点（对象移动/缩放/对齐后跟随）；端点对象没了的连接线自动移除（大声：不留悬空线）。"""
         if not getattr(self, "connectors", None):
@@ -211,13 +241,7 @@ class ConnectorsMixin:
             self.op_label.setText("连接线未建立：起点和终点都要落在一个对象上"); return
         if src is dst and src_e == dst_e:  # 同一对象/同一元素 → 不连（但同层【不同元素】允许，支持SVG内部连接）
             self.op_label.setText("连接线未建立：起点和终点是同一个对象"); return
-        import connector_item
-        self._push_history("连接线")
-        c = connector_item.ConnectorItem(self, src.get("uid"), dst.get("uid"), src_eidx=src_e, dst_eidx=dst_e)
-        self.scene.addItem(c)
-        self.connectors.append(c)
-        if not c.update_path():  # 极端情况端点框拿不到 → 撤掉，fail-loud
-            self.scene.removeItem(c); self.connectors.remove(c)
+        if self._create_connector(src, src_e, dst, dst_e, arrow=True) is None:
             self.op_label.setText("连接线建立失败（拿不到对象外框）"); return
         self.op_label.setText("✓ 已连接两个对象（连在边中心）· 移动/缩放自动跟随 · 右键连线改形状/颜色/删除")
 
