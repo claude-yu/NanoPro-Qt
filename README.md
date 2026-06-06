@@ -146,7 +146,7 @@ python -m PyInstaller NanoPro.spec --noconfirm
 "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" NanoPro_Setup.iss
 ```
 
-刻意排除 torch/CUDA 等巨物（本地抠图仅用 onnxruntime CPU 推理），独立程序约 310 MB、安装包约 94 MB。**安装包可直接在 [Releases](../../releases) 下载**（无需管理员）。
+刻意排除 torch/CUDA 等巨物（本地抠图仅用 onnxruntime CPU 推理）；WB 凝胶分析依赖的 scipy 已整包打入（防冻结态 ImportError），独立程序约 600 MB。**安装包 / 免安装版可直接在 [Releases](../../releases) 下载**（无需管理员）。
 
 ---
 
@@ -167,7 +167,10 @@ src/
   editor_text.py      文字工具 + 画布内打字
   editor_export.py    导出 PNG/TIFF + 合成 + 工程读写
   editor_connectors.py 智能连接线（边中点锚点 + 跟随 + 形状切换）
-  wb_analyzer.py / wb_quant.py  Western blot 灰度定量（ImageJ 口径）
+  wb_analyzer.py      Western blot 灰度定量面板（智能检测 / Ctrl 选道 / 堆叠密度曲线 / 批量审核）
+  wb_quant.py         WB 测量内核（IntDen / 背景 / 极性 / RGB→8bit）
+  gel_analyzer.py     凝胶分析（复刻 ImageJ Plot Lanes：getProfile + 直线基线 + find_peaks 分峰）
+  wb_batch.py         WB 批量分析（多图检测框 + 长/宽表 CSV）
   canvas_view.py      QGraphicsView 画布交互
   connector_item.py   连接线图元（边中点几何 + 箭头）
   layer_item.py       图层项（含非破坏蒙版）
