@@ -61,11 +61,11 @@ class VectorMixin:
             QtWidgets.QMessageBox.warning(self, "导入 SVG 失败", f"解析失败：{e}")
             return
         if not velems:
-            QtWidgets.QMessageBox.information(self, "导入 SVG", "未解析到任何矢量元素（空 SVG 或全为不支持特性）")
+            self._toast("未解析到任何矢量元素")
             return
         pairs = svg_io.build_items(velems)
         if not pairs:
-            QtWidgets.QMessageBox.information(self, "导入 SVG", "无法构建任何可编辑图元")
+            self._toast("无法构建任何可编辑图元")
             return
         self._push_history("导入矢量图")  # 导入前快照（此时无该矢量层）→ 撤销=移除该层
         # 空画布 → 按 viewBox/width-height 设画布尺寸（与 import_image 一致）
@@ -114,7 +114,7 @@ class VectorMixin:
         """
         vlayers = self._vector_layers()
         if not vlayers:
-            QtWidgets.QMessageBox.information(self, "导出 SVG", "当前没有矢量层（请先导入 SVG）")
+            self._toast("当前没有矢量层，请先导入 SVG")
             return
         if not path:
             name = f"{getattr(self, 'source_name', None) or 'figure'}.svg"
@@ -161,7 +161,7 @@ class VectorMixin:
         """
         # 空画布 fail-loud（与 export_png/export_tiff 同款文案与行为）
         if self.canvas_size is None or not self.layers:
-            QtWidgets.QMessageBox.information(self, "导出", "画布为空")
+            self._toast("画布为空")
             return
         if not path:
             name = f"{getattr(self, 'source_name', None) or 'figure'}.pdf"

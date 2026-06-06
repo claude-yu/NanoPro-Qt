@@ -61,6 +61,8 @@ class LayersMixin:
 
     def _refresh_layers(self):
         from editor_window import GroupHeaderRow, LayerRow
+        if self.layers and hasattr(self, "layer_guide"):
+            self._complete_guide("layer_panel", "layer_guide")
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
         live = {l.get("uid") for l in self.layers}  # 顺手清掉已删除层的缩略图缓存，防字典无限增长
@@ -92,6 +94,8 @@ class LayersMixin:
             self.layer_list.addItem(it)
             self.layer_list.setItemWidget(it, row)
         self.layer_list.blockSignals(False)
+        if hasattr(self, "layer_stack"):
+            self.layer_stack.setCurrentWidget(self.layer_list if self.layers else self.layer_empty)
 
     def _vector_thumb(self, layer: dict) -> QtGui.QPixmap:
         """矢量层缩略图：把该层所有顶层 item 渲到 THUMB×THUMB（按其场景包围盒缩放）。空则返回占位。"""
@@ -303,12 +307,15 @@ class LayersMixin:
 
     def _delete_active(self):  # 底部图标栏「删除」：删当前激活层（delete_layer 已含锁定/空判提示）
         if not self.active:
-            QtWidgets.QMessageBox.information(self, "删除图层", "请先在图层面板选中一个图层")
+            self._toast("请先在图层面板选中一个图层")
             return
         self.delete_layer()
 
     def _rename_layer(self, layer: dict):
-        name, ok = QtWidgets.QInputDialog.getText(self, "重命名图层", "名称：", text=layer.get("name", ""))
+        if hasattr(self, "_ask_text"):
+            name, ok = self._ask_text("重命名图层", "名称：", layer.get("name", ""))
+        else:
+            name, ok = QtWidgets.QInputDialog.getText(self, "重命名图层", "名称：", text=layer.get("name", ""))
         if ok and name:
             self._push_history("重命名图层")
             layer["name"] = name
@@ -325,8 +332,7 @@ class LayersMixin:
         if len(members) < 2:
             members = [l for l in getattr(self, "selected_layers", []) if l in self.layers and l.get("visible", True)]
         if len(members) < 2:
-            QtWidgets.QMessageBox.information(
-                self, "打组", "请先选中至少 2 个图层（图层面板里按住 Ctrl/Shift 多选，或右键「勾选以打组」），再点「打组」")
+            self._toast("请先选中至少 2 个图层，再打组")
             return
         self._push_history("打组")  # 打组可撤销 + 防 Ctrl+Z 复活已解散的组（group 在 snapshot 里，对齐 _set_group_visible 约定）
         self._group_seq += 1
@@ -356,7 +362,7 @@ class LayersMixin:
         if getattr(self, "_selected_group", None):
             gids.add(self._selected_group)
         if not gids:
-            QtWidgets.QMessageBox.information(self, "解组", "请勾选或选中一个组内的图层，再点「解组」")
+            self._toast("请先勾选或选中一个组内图层，再解组")
             return
         self._push_history("解组")  # 解组可撤销（同上）
         n = 0
@@ -385,7 +391,10 @@ class LayersMixin:
         self.op_label.setText(f"已选中组：{self._group_names.get(gid, gid)}")
 
     def _rename_group(self, gid: str):
-        name, ok = QtWidgets.QInputDialog.getText(self, "重命名组", "名称：", text=self._group_names.get(gid, gid))
+        if hasattr(self, "_ask_text"):
+            name, ok = self._ask_text("重命名组", "名称：", self._group_names.get(gid, gid))
+        else:
+            name, ok = QtWidgets.QInputDialog.getText(self, "重命名组", "名称：", text=self._group_names.get(gid, gid))
         if ok and name:
             self._push_history("重命名组")
             self._group_names[gid] = name
@@ -538,7 +547,7 @@ class LayersMixin:
 
     def _active_locked(self) -> bool:
         if self.active and self.active.get("locked"):
-            QtWidgets.QMessageBox.information(self, "提示", "该图层已锁定（不能移动/涂改）。点图层上的锁图标解锁。")
+            self._toast("该图层已锁定，点图层上的锁图标解锁")
             return True
         return False
 
@@ -577,7 +586,7 @@ class LayersMixin:
         if not self.active:
             return
         if self.active.get("locked"):
-            QtWidgets.QMessageBox.information(self, "提示", "图层已锁定，先点图层上的锁图标解锁再删除")
+            self._toast("图层已锁定，先解锁再删除")
             return
         self._clear_node_overlay()  # B5：删层前清锚点 overlay（target 可能属被删层 → 防悬空）
         self._push_history("删除图层")
@@ -606,15 +615,13 @@ class LayersMixin:
         """把当前选区变成该层的非破坏蒙版（选区内露/外藏，原图像素不动）。layer=None→活动层。"""
         layer = layer or self.active
         if layer is None or layer.get("kind") == "vector":
-            QtWidgets.QMessageBox.information(self, "图层蒙版", "请先选中一个图片/栅格图层"); return
+            self._toast("请先选中一个图片/栅格图层"); return
         sel = self.selection_mask
         if sel is None:
-            QtWidgets.QMessageBox.information(
-                self, "图层蒙版", "先用 套索/矩形/魔棒/选区画笔 在该层上取一个选区，再生成蒙版"); return
+            self._toast("先在该层上取一个选区，再生成蒙版"); return
         h, w = layer["image"].height(), layer["image"].width()
         if tuple(sel.shape[:2]) != (h, w):
-            QtWidgets.QMessageBox.information(
-                self, "图层蒙版", "选区与该图层尺寸不一致——请在要加蒙版的那个图层上取选区"); return
+            self._toast("选区与该图层尺寸不一致，请在目标图层上取选区"); return
         self._push_history("添加图层蒙版")
         mask = np.where(sel > 0, np.uint8(255), np.uint8(0))  # 选区内露(255)、外藏(0)
         layer["mask"] = mask

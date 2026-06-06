@@ -24,7 +24,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 class SelectionMixin:
     def do_auto_decompose(self):
         if not self.active:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选中一个图层（通常是底图）")
+            self._toast("请先选中一个图层（通常是底图）")
             return
         rgba = image_ops.qimage_to_rgba(self.active["image"])
         # 主线程阻塞的 cv2 操作：只给等待光标（busy 动画无法滚动，因事件循环不转）。
@@ -36,7 +36,7 @@ class SelectionMixin:
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()  # 无论拆解成败都复原，不残留 override cursor
         if not pieces:
-            QtWidgets.QMessageBox.information(self, "自动拆解", info)
+            self._toast(info)
             return
         for p in pieces:
             self.assets.append(image_ops.rgba_to_qimage(p))
@@ -47,7 +47,7 @@ class SelectionMixin:
         # 1. 取源图：有活动层→优先活动层；否则画布合成。fail-loud：都没有则提示。
         src = self._ai_ref_layer_b64() or self._ai_snapshot_b64()
         if not src:
-            QtWidgets.QMessageBox.information(self, "AI 抠图/拆解", "请先导入图片或选中一个图层")
+            self._toast("请先导入图片或选中一个图层")
             return
         conn = config.get_seg_conn()
         provider = conn["provider"]
@@ -66,9 +66,7 @@ class SelectionMixin:
         if provider == "grsai":
             gc = config.get_connection()  # 复用 grsai 生图配置（用户已配好 key）
             if not gc.get("has_key"):
-                QtWidgets.QMessageBox.information(
-                    self, "AI 抠图/拆解",
-                    "grsai 后端未配置 Key：请到「AI 生成」面板的「设置」里填写 grsai key")
+                self._toast("grsai 后端未配置 Key，请到 AI 生成面板设置")
                 return
             base_url = conn.get("node") or config.grsai_base()
             key = config.read_key()
@@ -282,7 +280,7 @@ class SelectionMixin:
             return
         p0, p1 = self._rect_p0, self._rect_p1; self._rect_p0 = None; self._remove_preview()
         if not self.active:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选中要裁剪的图层")
+            self._toast("请先选中要裁剪的图层")
             return
         if self._active_locked():
             return
@@ -484,7 +482,7 @@ class SelectionMixin:
 
     def _need_selection(self) -> bool:
         if self.selection_mask is None or self.active is None:
-            QtWidgets.QMessageBox.information(self, "提示", "先用 套索 / 矩形 / 魔棒 取一个选区")
+            self._toast("先用套索 / 矩形 / 魔棒取一个选区")
             return False
         return True
 
@@ -493,7 +491,7 @@ class SelectionMixin:
         # 不删源层像素。有选区=限定在选区内，无选区=整层。
         layer = self.active or (self.layers[-1] if self.layers else None)
         if layer is None:
-            QtWidgets.QMessageBox.information(self, "提示", "请先导入图片或新建一个图层")
+            self._toast("请先导入图片或新建一个图层")
             return
         rgba = image_ops.qimage_to_rgba(layer["image"])
         bg = image_ops.background_mask(rgba, self.tol_slider.value())
@@ -516,31 +514,24 @@ class SelectionMixin:
         # 不碰源层、不入历史（与 do_remove_bg 一致；do_delete_selection 才改源层+_push_history）。
         layer = self.active or (self.layers[-1] if self.layers else None)
         if layer is None:
-            QtWidgets.QMessageBox.information(self, "提示", "请先导入图片或新建一个图层")
+            self._toast("请先导入图片或新建一个图层")
             return
         rgba = image_ops.qimage_to_rgba(layer["image"])
         sel = self.selection_mask
         if sel is None or sel.shape != rgba.shape[:2] or not (sel > 0).any():
-            # 缺前景种子：与"没图层"一致用【弹窗】明确提示用法，不再只写 op_label 小字(用户反馈"点了没反应")
             self.op_label.setText("GrabCut：请先取个粗选区再抠")
-            QtWidgets.QMessageBox.information(
-                self, "GrabCut 用法",
-                "GrabCut 要先有一个【粗选区】当前景种子，再点它抠图：\n\n"
-                "1. 先用 魔棒 / 套索 / 选区画笔 在主体上大致圈一下（不用很准）\n"
-                "2. 再点「GrabCut 抠图」，它会把主体从背景里抠出来 → 进素材库\n\n"
-                "（抠整张多元素图请改用「去背景」或「自动拆解」。）")
+            self._toast("GrabCut 需要先用魔棒 / 套索 / 选区画笔取一个粗选区")
             return
-        # 逐次迭代 + QProgressDialog 真进度条（每步 processEvents 刷新；可取消）——不再只给等待光标干转。
+        # 逐次迭代 + 项目内 ProgressSheet 真进度条（每步 processEvents 刷新；可取消）。
         self.op_label.setText("GrabCut 计算中…")
         ITERS = 8  # 多分几步 → 进度条更顺
-        dlg = QtWidgets.QProgressDialog("GrabCut 抠图计算中…", "取消", 0, ITERS, self)
-        dlg.setWindowTitle("GrabCut 抠图")
-        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-        dlg.setMinimumDuration(0); dlg.setAutoClose(True); dlg.setAutoReset(True); dlg.setValue(0)
+        dlg = self._begin_progress("GrabCut 抠图", "正在计算前景区域", ITERS)
 
         def _cb(done, total):
-            dlg.setMaximum(total); dlg.setValue(done)
-            QtWidgets.QApplication.processEvents()  # 刷新进度条 + 响应取消
+            if getattr(dlg, "_total", 0) != total:
+                dlg._total = total
+                dlg.bar.setRange(0, total)
+            dlg.step(done, "正在迭代 %d / %d" % (done, total))
             return not dlg.wasCanceled()
 
         ok = False
@@ -557,7 +548,7 @@ class SelectionMixin:
             self._refresh_assets()
             ok = True
         finally:
-            dlg.close()  # 无论成功/失败/取消都关进度条
+            self._end_progress(dlg)  # 无论成功/失败/取消都关进度条
         if not ok:
             return
         # 防呆：GrabCut 抠【单主体】，对宽幅多元素整图常只留中间团块、丢掉低对比边缘部分（用户反馈"抠出方的/缺了一块"）。
@@ -571,11 +562,7 @@ class SelectionMixin:
                     "——要整图保比例/保留所有元素请改用「去背景」或「自动拆解」")
             if kept_px < seed_px * 0.4 and not getattr(self, "_grabcut_dropwarned", False):
                 self._grabcut_dropwarned = True  # 一次性提示，不每次弹（仿 _vec_edit_warned）
-                QtWidgets.QMessageBox.information(
-                    self, "GrabCut 提示",
-                    f"GrabCut 只保留了所选区域约 {pct}%。\n\n"
-                    "GrabCut 用于抠【单个主体】，会丢掉低对比/边缘部分。\n"
-                    "要抠【整张图】并保持比例、保留所有元素，请改用「去背景」或「自动拆解」。")
+                self._toast("GrabCut 只保留约 %d%%，整图保比例请改用去背景或自动拆解" % pct, 4200)
         self.op_label.setText(f"GrabCut 抠图：已生成透明素材（共 {len(self.assets)} 个）{hint}")
 
     def do_delete_selection(self):
@@ -613,7 +600,7 @@ class SelectionMixin:
             return
         res = self._crop_selection()
         if res is None:
-            QtWidgets.QMessageBox.information(self, "提示", "选区为空")
+            self._toast("选区为空")
             return
         new_img, x0, y0, m = res
         cut = self.hole_check.isChecked()  # 剪切模式：原位填底色覆盖

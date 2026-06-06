@@ -230,6 +230,66 @@ def tool_icon(name: str, color: str = "#cdd2db", size: int = 22) -> QtGui.QIcon:
         _line(pt, cx - rr * 0.45, cy, cx + rr * 0.45, cy)      # 横线（+ 与 − 共用）
         if name == "zoom":
             _line(pt, cx, cy - rr * 0.45, cx, cy + rr * 0.45)  # 竖线 → +（放大镜）
+    elif name == "settings":
+        pt.drawEllipse(QtCore.QPointF(c, c), s * 0.16, s * 0.16)
+        for ang in range(0, 360, 45):
+            r = math.radians(ang)
+            x1, y1 = c + math.cos(r) * s * 0.30, c + math.sin(r) * s * 0.30
+            x2, y2 = c + math.cos(r) * s * 0.42, c + math.sin(r) * s * 0.42
+            _line(pt, x1, y1, x2, y2)
+    elif name == "folder":
+        path = QtGui.QPainterPath()
+        path.moveTo(s * 0.14, s * 0.34)
+        path.lineTo(s * 0.38, s * 0.34)
+        path.lineTo(s * 0.46, s * 0.26)
+        path.lineTo(s * 0.72, s * 0.26)
+        path.lineTo(s * 0.72, s * 0.38)
+        path.lineTo(s * 0.86, s * 0.38)
+        path.lineTo(s * 0.80, s * 0.78)
+        path.lineTo(s * 0.18, s * 0.78)
+        path.closeSubpath()
+        pt.drawPath(path)
+    elif name == "download":
+        _line(pt, c, s * 0.18, c, s * 0.62)
+        _line(pt, c, s * 0.62, c - s * 0.16, s * 0.46)
+        _line(pt, c, s * 0.62, c + s * 0.16, s * 0.46)
+        _line(pt, s * 0.24, s * 0.78, s * 0.76, s * 0.78)
+    elif name == "save":
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.18, s * 0.16, s * 0.64, s * 0.68), 2.5, 2.5)
+        pt.drawRect(QtCore.QRectF(s * 0.30, s * 0.18, s * 0.34, s * 0.22))
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.32, s * 0.58, s * 0.36, s * 0.20), 2.0, 2.0)
+    elif name == "copy":
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.30, s * 0.18, s * 0.48, s * 0.54), 2.5, 2.5)
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.18, s * 0.30, s * 0.48, s * 0.54), 2.5, 2.5)
+    elif name == "paste":
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.24, s * 0.26, s * 0.52, s * 0.58), 2.5, 2.5)
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.36, s * 0.14, s * 0.28, s * 0.18), 2.0, 2.0)
+        _line(pt, s * 0.34, s * 0.46, s * 0.66, s * 0.46)
+        _line(pt, s * 0.34, s * 0.60, s * 0.60, s * 0.60)
+    elif name == "palette":
+        pt.drawEllipse(QtCore.QPointF(c, c), s * 0.34, s * 0.28)
+        pt.setBrush(QtGui.QColor(color))
+        for px, py in ((0.36, 0.38), (0.52, 0.32), (0.64, 0.46), (0.44, 0.58)):
+            pt.drawEllipse(QtCore.QPointF(s * px, s * py), s * 0.045, s * 0.045)
+        pt.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        pt.drawEllipse(QtCore.QPointF(s * 0.62, s * 0.62), s * 0.055, s * 0.045)
+    elif name == "scissors":
+        pt.drawEllipse(QtCore.QPointF(s * 0.28, s * 0.28), s * 0.10, s * 0.10)
+        pt.drawEllipse(QtCore.QPointF(s * 0.28, s * 0.72), s * 0.10, s * 0.10)
+        _line(pt, s * 0.36, s * 0.34, s * 0.80, s * 0.18)
+        _line(pt, s * 0.36, s * 0.66, s * 0.80, s * 0.82)
+        _line(pt, s * 0.42, s * 0.50, s * 0.78, s * 0.50)
+    elif name == "clock":
+        pt.drawEllipse(QtCore.QPointF(c, c), s * 0.34, s * 0.34)
+        _line(pt, c, c, c, s * 0.30)
+        _line(pt, c, c, s * 0.66, s * 0.58)
+    elif name in ("chevron_right", "chevron_down"):
+        if name == "chevron_right":
+            _line(pt, s * 0.40, s * 0.28, s * 0.62, s * 0.50)
+            _line(pt, s * 0.62, s * 0.50, s * 0.40, s * 0.72)
+        else:
+            _line(pt, s * 0.28, s * 0.40, s * 0.50, s * 0.62)
+            _line(pt, s * 0.50, s * 0.62, s * 0.72, s * 0.40)
     elif name in ("align_left", "align_hcenter", "align_right",
                   "align_top", "align_vcenter", "align_bottom"):
         # 基准线（实线）+ 两个对齐到该线的小方块。横向对齐画竖基准线 + 横排两块；纵向反之。

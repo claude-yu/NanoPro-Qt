@@ -380,7 +380,7 @@ class TextMixin:
 
     def _apply_text(self):
         if not self.active or self.active.get("kind") != "text":
-            QtWidgets.QMessageBox.information(self, "提示", "请先双击选中一个文字层，再「应用到选中」")
+            self._toast("请先双击选中一个文字层，再应用样式")
             return
         self._push_history("文字")
         props = self._text_props_from_panel()

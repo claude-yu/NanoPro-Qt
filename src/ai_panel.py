@@ -12,6 +12,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import ai_client
 import config
+import icons
 import seg_client
 import style_lib
 import theme
@@ -353,12 +354,14 @@ class AiPanel(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(inner)
         lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(7)
 
-        # —— 设置（可折叠：▸ 收起 / ▾ 展开）；key 状态并进标题，去掉旧独立红 banner(对齐对话面板·审核 MEDIUM)——
+        # —— 设置（可折叠）；key 状态并进标题，去掉旧独立红 banner(对齐对话面板·审核 MEDIUM)——
         self.settings_toggle = QtWidgets.QToolButton()
-        self.settings_toggle.setText("▸  设置（中转商地址 / Key / 模型）")
+        self.settings_toggle.setText("设置（中转商地址 / Key / 模型）")
+        self.settings_toggle.setIcon(icons.tool_icon("chevron_right", theme.colors()["text"], 16))
+        self.settings_toggle.setIconSize(QtCore.QSize(16, 16))
         self.settings_toggle.setCheckable(True); self.settings_toggle.setChecked(False)
         self.settings_toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.settings_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.settings_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.settings_toggle.setObjectName("sectionToggle")  # 折叠头样式走主题 QSS（与聊天面板统一）
         self.settings_toggle.toggled.connect(self._toggle_settings)
         lay.addWidget(self.settings_toggle)
@@ -377,7 +380,12 @@ class AiPanel(QtWidgets.QWidget):
         self.key_input = QtWidgets.QLineEdit(); self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.key_input.setPlaceholderText("API Key (sk-…)，留空=不改")
         self.key_input.setToolTip("你的 API Key，仅保存在本机 ~/.sciedit，不进程序/仓库/日志；留空=不修改已存的 Key")
-        self.key_eye = QtWidgets.QToolButton(); self.key_eye.setText("👁"); self.key_eye.setToolTip("显示/隐藏所填 Key")
+        self.key_eye = QtWidgets.QToolButton()
+        self.key_eye.setObjectName("iconButton")
+        self.key_eye.setIcon(icons.eye_icon(False, theme.colors()["text"], 18))
+        self.key_eye.setIconSize(QtCore.QSize(18, 18))
+        self.key_eye.setCheckable(True)
+        self.key_eye.setToolTip("显示/隐藏所填 Key")
         self.key_eye.clicked.connect(self._toggle_key_echo)
         self.save_btn = QtWidgets.QPushButton("保存"); self.save_btn.clicked.connect(self._save_conn)
         krow.addWidget(self.key_input, 1); krow.addWidget(self.key_eye); krow.addWidget(self.save_btn)
@@ -417,10 +425,12 @@ class AiPanel(QtWidgets.QWidget):
         lay.addWidget(self.prompt, 1)
 
         self.neg_toggle = QtWidgets.QToolButton()
-        self.neg_toggle.setText("▸  负面提示词（已默认填好不友好词，点开可改）")
+        self.neg_toggle.setText("负面提示词（已默认填好不友好词，点开可改）")
+        self.neg_toggle.setIcon(icons.tool_icon("chevron_right", theme.colors()["text"], 16))
+        self.neg_toggle.setIconSize(QtCore.QSize(16, 16))
         self.neg_toggle.setCheckable(True); self.neg_toggle.setChecked(False)
         self.neg_toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.neg_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.neg_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.neg_toggle.setObjectName("sectionToggle")
         self.neg_toggle.toggled.connect(self._toggle_neg)
         lay.addWidget(self.neg_toggle)
@@ -517,28 +527,31 @@ class AiPanel(QtWidgets.QWidget):
 
     def _toggle_neg(self, on: bool):
         self.neg_box.setVisible(on)
-        self.neg_toggle.setText(("▾  " if on else "▸  ") + "负面提示词（已默认填好不友好词，点开可改）")
+        self.neg_toggle.setIcon(icons.tool_icon("chevron_down" if on else "chevron_right", theme.colors()["text"], 16))
+        self.neg_toggle.setText("负面提示词（已默认填好不友好词，点开可改）")
 
     def _toggle_settings(self, on: bool):
         self.settings_box.setVisible(on)  # 真折叠：隐藏后不占高度
         self._refresh_toggle_label()
 
     def _refresh_toggle_label(self):
-        # 折叠标题：▸/▾ 设置 · {当前模型} · Key✓/未设 Key —— 收起也能一眼看到模型 + key 状态，替代旧独立红 banner。
-        arrow = "▾" if self.settings_box.isVisible() else "▸"
+        # 折叠标题：设置 · {当前模型} · Key✓/未设 Key —— 收起也能一眼看到模型 + key 状态，替代旧独立红 banner。
+        expanded = self.settings_box.isVisible()
+        self.settings_toggle.setIcon(icons.tool_icon("chevron_down" if expanded else "chevron_right", theme.colors()["text"], 16))
         tag = "Key✓" if self._has_key else "未设 Key"
         model = (self._current_model() or "模型?") if hasattr(self, "model_combo") else "模型?"
-        self.settings_toggle.setText("%s  设置 · %s · %s" % (arrow, model, tag))
+        self.settings_toggle.setText("设置 · %s · %s" % (model, tag))
 
     def _toggle_key_echo(self):
         pw = self.key_input.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal if pw else QtWidgets.QLineEdit.EchoMode.Password)
-        self.key_eye.setText("🙈" if pw else "👁")
+        self.key_eye.setIcon(icons.eye_icon(pw, theme.colors()["text"], 18))
 
     def _prefill_key(self):
         """把当前中转站已存的 Key 回填进框（密码打码，点眼睛才显）——保存后/切站后都看得出已存、平常不露明文。"""
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.key_eye.setText("👁")
+        self.key_eye.setChecked(False)
+        self.key_eye.setIcon(icons.eye_icon(False, theme.colors()["text"], 18))
         self.key_input.setText(config.read_key(self._cur_pid()) or "")
 
     def _cur_pid(self):
@@ -629,15 +642,15 @@ class AiPanel(QtWidgets.QWidget):
         self.btn_pull.setEnabled(True)
         self._models_worker = None
         if err and not models:
-            self._set_status("❌ 拉取失败：%s（grsai 私有站可能不支持 /models，手填模型即可）" % err, True); return
+            self._set_status("拉取失败：%s（grsai 私有站可能不支持 /models，手填模型即可）" % err, True); return
         if not models:
-            self._set_status("⚠ 返回成功但没解析到模型，手填即可", True); return
+            self._set_status("返回成功但没解析到模型，手填即可", True); return
         self._fill_models(models, keep_current=True)
         try:
             config.set_gen_models(self._cur_pid(), models)
         except Exception:
             pass
-        self._set_status("✅ 拉取到 %d 个模型，点下拉选一个" % len(models))
+        self._set_status("已拉取到 %d 个模型，点下拉选一个" % len(models))
         self.model_combo.showPopup()  # 自动展开让用户直接选
 
     def _current_model(self):
@@ -864,12 +877,12 @@ class AiPanel(QtWidgets.QWidget):
 
     # ---------- 任务行 UI ----------
     def _build_task_row(self, t: Task):
-        row = QtWidgets.QFrame(); row.setObjectName("card")
-        h = QtWidgets.QHBoxLayout(row); h.setContentsMargins(6, 5, 6, 5); h.setSpacing(6)
+        row = QtWidgets.QFrame(); row.setObjectName("taskRow")
+        h = QtWidgets.QHBoxLayout(row); h.setContentsMargins(7, 6, 7, 6); h.setSpacing(7)
         # 缩略图：图生图首张 ref 解码小图；纯文生图占位「T」
         thumb = QtWidgets.QLabel(); thumb.setFixedSize(40, 40)
+        thumb.setObjectName("taskThumb")
         thumb.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        thumb.setStyleSheet("border:1px solid rgba(128,128,128,0.4); border-radius:4px;")
         pm = self._ref_thumb_pixmap(t.params.get("ref"))
         if pm is not None:
             thumb.setPixmap(pm)
@@ -903,7 +916,11 @@ class AiPanel(QtWidgets.QWidget):
         btn_stop = QtWidgets.QToolButton(); btn_stop.setText("停止"); btn_stop.setProperty("danger", True)
         btn_stop.setToolTip("停止该任务；已成功的张数仍会落到画布")
         btn_stop.clicked.connect(lambda: self._stop(t))
-        btn_remove = QtWidgets.QToolButton(); btn_remove.setText("×")
+        btn_remove = QtWidgets.QToolButton()
+        btn_remove.setObjectName("iconButton")
+        btn_remove.setProperty("danger", True)
+        btn_remove.setIcon(icons.tool_icon("trash", theme.colors()["danger"], 16))
+        btn_remove.setIconSize(QtCore.QSize(16, 16))
         btn_remove.setToolTip("移除该任务（在跑则先停止）")
         btn_remove.clicked.connect(lambda: self._remove(t))
         for b in (btn_extend, btn_stop, btn_remove):

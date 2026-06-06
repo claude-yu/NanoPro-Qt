@@ -14,6 +14,7 @@ from PySide6 import QtCore, QtWidgets
 
 import chat_client
 import config
+import icons
 import theme
 
 
@@ -108,11 +109,13 @@ class ChatPanel(QtWidgets.QWidget):
         lay = QtWidgets.QVBoxLayout(inner)
         lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(7)
 
-        # —— 设置（可折叠：▸ 收起 / ▾ 展开；标题带 provider + key 状态小标，一眼可见无需展开）——
+        # —— 设置（可折叠；标题带 provider + key 状态小标，一眼可见无需展开）——
         self.settings_toggle = QtWidgets.QToolButton()
+        self.settings_toggle.setIcon(icons.tool_icon("chevron_right", theme.colors()["text"], 16))
+        self.settings_toggle.setIconSize(QtCore.QSize(16, 16))
         self.settings_toggle.setCheckable(True); self.settings_toggle.setChecked(False)
         self.settings_toggle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.settings_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.settings_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.settings_toggle.setObjectName("sectionToggle")  # 折叠头样式走主题 QSS
         self.settings_toggle.toggled.connect(self._toggle_settings)
         lay.addWidget(self.settings_toggle)
@@ -132,7 +135,12 @@ class ChatPanel(QtWidgets.QWidget):
         self.key_input = QtWidgets.QLineEdit(); self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.key_input.setPlaceholderText("API Key (sk-…)，留空=不改")
         self.key_input.setToolTip("对话模型 API Key，仅保存在本机 ~/.sciedit，不进程序/仓库/日志；留空=不修改已存的 Key")
-        self.key_eye = QtWidgets.QToolButton(); self.key_eye.setText("👁"); self.key_eye.setToolTip("显示/隐藏所填 Key")
+        self.key_eye = QtWidgets.QToolButton()
+        self.key_eye.setObjectName("iconButton")
+        self.key_eye.setIcon(icons.eye_icon(False, theme.colors()["text"], 18))
+        self.key_eye.setIconSize(QtCore.QSize(18, 18))
+        self.key_eye.setCheckable(True)
+        self.key_eye.setToolTip("显示/隐藏所填 Key")
         self.key_eye.clicked.connect(self._toggle_key_echo)
         self.save_btn = QtWidgets.QPushButton("保存"); self.save_btn.clicked.connect(self._save_conn)
         krow.addWidget(self.key_input, 1); krow.addWidget(self.key_eye); krow.addWidget(self.save_btn)
@@ -218,8 +226,9 @@ class ChatPanel(QtWidgets.QWidget):
         self._refresh_toggle_label()
 
     def _refresh_toggle_label(self):
-        """折叠标题：▸/▾ 设置 · {provider 名} · Key✓/未设。展开收起都带当前 provider + key 状态。"""
-        arrow = "▾" if self.settings_box.isVisible() else "▸"
+        """折叠标题：设置 · {provider 名} · Key✓/未设。展开收起都带当前 provider + key 状态。"""
+        expanded = self.settings_box.isVisible()
+        self.settings_toggle.setIcon(icons.tool_icon("chevron_down" if expanded else "chevron_right", theme.colors()["text"], 16))
         pid = self.provider_combo.currentData()
         label = self.provider_combo.currentText() or pid or "—"
         # provider 标签取「label 括号前的主名」，过长截断
@@ -227,17 +236,18 @@ class ChatPanel(QtWidgets.QWidget):
         if len(name) > 14:
             name = name[:14] + "…"
         key_tag = "Key✓" if self._has_key else "未设 Key"
-        self.settings_toggle.setText("%s  设置 · %s · %s" % (arrow, name, key_tag))
+        self.settings_toggle.setText("设置 · %s · %s" % (name, key_tag))
 
     def _toggle_key_echo(self):
         pw = self.key_input.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal if pw else QtWidgets.QLineEdit.EchoMode.Password)
-        self.key_eye.setText("🙈" if pw else "👁")
+        self.key_eye.setIcon(icons.eye_icon(pw, theme.colors()["text"], 18))
 
     def _prefill_key(self):
         """把当前商家已存的 Key 回填进框（密码打码，点眼睛才显）——保存后/切商家后都看得出已存、平常不露明文。"""
         self.key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self.key_eye.setText("👁")
+        self.key_eye.setChecked(False)
+        self.key_eye.setIcon(icons.eye_icon(False, theme.colors()["text"], 18))
         self.key_input.setText(config.read_chat_key(self._cur_pid()) or "")
 
     @staticmethod
@@ -354,15 +364,15 @@ class ChatPanel(QtWidgets.QWidget):
         self.btn_pull.setEnabled(True)
         self._models_worker = None
         if err and not models:
-            self._set_status("❌ 拉取失败：%s" % err, True); return
+            self._set_status("拉取失败：%s" % err, True); return
         if not models:
-            self._set_status("⚠ 返回成功但没解析到模型", True); return
+            self._set_status("返回成功但没解析到模型", True); return
         self._fill_models(models, keep_current=True)
         try:
             config.set_chat_models(self._cur_pid(), models)
         except Exception:
             pass  # 持久化失败不致命，下拉已填
-        self._set_status("✅ 拉取到 %d 个模型，点下拉选一个" % len(models))
+        self._set_status("已拉取到 %d 个模型，点下拉选一个" % len(models))
         # 自动展开下拉，直接把拉取到的模型显示出来让用户选（不必再去找那个小箭头）
         self.model_combo.showPopup()
 
@@ -532,7 +542,7 @@ class ChatPanel(QtWidgets.QWidget):
         self._last_prompt = text
         self.btn_use.setEnabled(True)
         if err:  # 有部分文本但也报了错 → fail-loud 提示，但仍保留已得文本
-            self._set_status("⚠ %s（已保留部分结果）" % err, True)
+            self._set_status("%s（已保留部分结果）" % err, True)
         else:
             self._set_status("✓ 已生成提示词，可点「用此提示词」")
         self._cur_bubble = None

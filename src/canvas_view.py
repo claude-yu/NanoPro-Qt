@@ -141,9 +141,25 @@ class CanvasView(QtWidgets.QGraphicsView):
         painter.fillRect(rect, self._out_color)  # 画布外
         sr = self.sceneRect()
         if sr.isValid() and sr.width() > 0:
+            c = theme.colors()
+            painter.save()
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            for pad, alpha in ((14, 12), (8, 20), (3, 30)):
+                shadow = QtGui.QColor(c["canvas_shadow"])
+                shadow.setAlpha(alpha)
+                painter.setBrush(shadow)
+                painter.drawRect(sr.adjusted(-pad, -pad, pad, pad))
+            painter.restore()
             painter.fillRect(sr.intersected(rect), self._checker)  # 画布内：棋盘格=透明
             if getattr(self, "_grid_on", False):
                 self._draw_grid(painter, sr, rect)
+            painter.save()
+            pen = QtGui.QPen(QtGui.QColor(c["canvas_border"]), 0)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawRect(sr.adjusted(0, 0, -1, -1))
+            painter.restore()
 
     def _draw_grid(self, painter: QtGui.QPainter, sr: QtCore.QRectF, rect: QtCore.QRectF):
         import math
@@ -190,19 +206,20 @@ class CanvasView(QtWidgets.QGraphicsView):
         if (not (self._guides_visible and (self._guides_v or self._guides_h))
                 and not _ag and self._measure_start is None and not _draw_anchors):
             return
+        c = theme.colors()
         if self._guides_visible:  # 用户参考线（从标尺拖出）：主题描边色细实线
-            pen = QtGui.QPen(QtGui.QColor(theme.colors()["outline"]), 0)
+            pen = QtGui.QPen(QtGui.QColor(c["outline"]), 0)
             pen.setCosmetic(True)  # 0 宽 cosmetic → 任意缩放都是 1px 细线
             painter.setPen(pen)
             for x in self._guides_v:
                 painter.drawLine(QtCore.QLineF(x, rect.top(), x, rect.bottom()))
             for y in self._guides_h:
                 painter.drawLine(QtCore.QLineF(rect.left(), y, rect.right(), y))
-        # 智能参考线（拖动时实时吸附命中）：洋红虚线，画在命中跨度上（AI/Illustrator 习惯）
+        # 智能参考线（拖动时实时吸附命中）：主题化虚线，画在命中跨度上（AI/Illustrator 习惯）
         ed = getattr(self, "_editor", None)
         guides = getattr(ed, "_active_guides", None) if ed is not None else None
         if guides:
-            pen = QtGui.QPen(QtGui.QColor("#ff00ff"), 0, QtCore.Qt.PenStyle.DashLine)
+            pen = QtGui.QPen(QtGui.QColor(c["smart_guide"]), 0, QtCore.Qt.PenStyle.DashLine)
             pen.setCosmetic(True)
             painter.setPen(pen)
             for g in guides:
@@ -211,25 +228,27 @@ class CanvasView(QtWidgets.QGraphicsView):
                     painter.drawLine(QtCore.QLineF(g["pos"], a, g["pos"], b))
                 else:
                     painter.drawLine(QtCore.QLineF(a, g["pos"], b, g["pos"]))
-        # 测量线（标尺工具）：洋红 cosmetic 实线 + 两端小方块（任意缩放都 1px 细线）
+        # 测量线（标尺工具）：主题化 cosmetic 实线 + 两端小方块（任意缩放都 1px 细线）
         if self._measure_start is not None and self._measure_end is not None:
             p0, p1 = self._measure_start, self._measure_end
-            pen = QtGui.QPen(QtGui.QColor("#ff2d95"), 0)
+            measure_color = QtGui.QColor(c["measure"])
+            pen = QtGui.QPen(measure_color, 0)
             pen.setCosmetic(True)
             painter.setPen(pen)
             painter.drawLine(QtCore.QLineF(p0, p1))
-            painter.setBrush(QtGui.QColor("#ff2d95"))
+            painter.setBrush(measure_color)
             r = 3.0 / max(self._zoom, 1e-6)  # 端点方块在屏幕上恒约 6px
             for pe in (p0, p1):
                 painter.drawRect(QtCore.QRectF(pe.x() - r, pe.y() - r, 2 * r, 2 * r))
         # 连接线/箭头/直线工具：悬停对象的 4 个边中点锚点（蓝点，BioRender 式 → 让用户看到能连到哪、连在边中心）
         if _draw_anchors:
-            apen = QtGui.QPen(QtGui.QColor("#1a73e8"), 0); apen.setCosmetic(True)
+            anchor_color = QtGui.QColor(c["connector_anchor"])
+            apen = QtGui.QPen(anchor_color, 0); apen.setCosmetic(True)
             painter.setPen(apen); painter.setBrush(QtGui.QColor(255, 255, 255))
             ar = 5.0 / max(self._zoom, 1e-6)  # 锚点在屏幕上恒约 10px
             for a in _anchors:
                 painter.drawEllipse(a, ar, ar)           # 白心
-                painter.setBrush(QtGui.QColor("#1a73e8"))
+                painter.setBrush(anchor_color)
                 painter.drawEllipse(a, ar * 0.5, ar * 0.5)  # 蓝芯
                 painter.setBrush(QtGui.QColor(255, 255, 255))
 
@@ -400,12 +419,13 @@ class CanvasView(QtWidgets.QGraphicsView):
         m = QtWidgets.QMenu(self)
         has_layer = getattr(ed, "active", None) is not None
         has_clip = not QtWidgets.QApplication.clipboard().image().isNull()
-        a_copy = m.addAction("复制图层"); a_copy.setEnabled(has_layer)
+        tc = theme.colors()
+        a_copy = m.addAction(icons.tool_icon("copy", tc["text"], 16), "复制图层"); a_copy.setEnabled(has_layer)
         a_copy.triggered.connect(ed.copy_to_clipboard)
-        a_paste = m.addAction("粘贴"); a_paste.setEnabled(has_clip)
+        a_paste = m.addAction(icons.tool_icon("paste", tc["text"], 16), "粘贴"); a_paste.setEnabled(has_clip)
         a_paste.triggered.connect(ed.paste_from_clipboard)
         m.addSeparator()
-        tm = m.addMenu("翻转 / 旋转")  # 作用于选中矢量元素或活动层
+        tm = m.addMenu(icons.tool_icon("move", tc["text"], 16), "翻转 / 旋转")  # 作用于选中矢量元素或活动层
         tm.addAction("水平翻转").triggered.connect(lambda: ed._flip_objects(True))
         tm.addAction("垂直翻转").triggered.connect(lambda: ed._flip_objects(False))
         tm.addAction("顺时针 90°").triggered.connect(lambda: ed._rotate_objects(90))
@@ -414,10 +434,10 @@ class CanvasView(QtWidgets.QGraphicsView):
         # 裁掉透明边：把当前图片层裁到真正的图（解决素材四周大方框）；不透明水印裁不掉，提示用裁剪工具
         _act = getattr(ed, "active", None)
         _is_raster = bool(_act and _act.get("kind") != "vector" and _act.get("image") is not None)
-        a_trim = m.addAction("✂ 裁掉透明边（裁到内容）"); a_trim.setEnabled(_is_raster)
+        a_trim = m.addAction(icons.tool_icon("crop", tc["text"], 16), "裁掉透明边（裁到内容）"); a_trim.setEnabled(_is_raster)
         a_trim.setToolTip("把当前图片层四周透明留白裁掉，使框=真正的图")
         a_trim.triggered.connect(ed._trim_active_layer)
-        a_del = m.addAction("删除图层"); a_del.setEnabled(has_layer)
+        a_del = m.addAction(icons.tool_icon("trash", tc["danger"], 16), "删除图层"); a_del.setEnabled(has_layer)
         a_del.triggered.connect(ed._delete_active)
         m.exec(e.globalPos())
         e.accept()

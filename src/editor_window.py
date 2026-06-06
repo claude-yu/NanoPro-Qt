@@ -88,8 +88,151 @@ def _swatch_css(bg: str, fg: str) -> str:
             f" border-radius:6px; min-height:18px;}}")
 
 
+class EmptyState(QtWidgets.QFrame):
+    """Right-panel empty state: icon, concise text, optional primary action."""
+
+    def __init__(self, icon_name: str, title: str, detail: str = "", button_text: str = "", slot=None):
+        super().__init__()
+        self.setObjectName("emptyState")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(14, 18, 14, 18)
+        lay.setSpacing(8)
+        ico = QtWidgets.QLabel()
+        ico.setObjectName("emptyIcon")
+        ico.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        ico.setPixmap(icons.tool_icon(icon_name, theme.colors()["muted"], 34).pixmap(QtCore.QSize(34, 34)))
+        title_lbl = QtWidgets.QLabel(title)
+        title_lbl.setObjectName("emptyTitle")
+        title_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setWordWrap(True)
+        detail_lbl = QtWidgets.QLabel(detail)
+        detail_lbl.setObjectName("emptyDetail")
+        detail_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        detail_lbl.setWordWrap(True)
+        lay.addStretch(1)
+        lay.addWidget(ico, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title_lbl)
+        if detail:
+            lay.addWidget(detail_lbl)
+        if button_text and slot is not None:
+            btn = QtWidgets.QPushButton(button_text)
+            btn.setProperty("primary", True)
+            btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            lay.addWidget(btn, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addStretch(1)
+
+
+class GuideBanner(QtWidgets.QFrame):
+    """Small dismissible first-use guide for dense right panels."""
+
+    dismissed = QtCore.Signal()
+
+    def __init__(self, icon_name: str, text: str, action_text: str = "", action_slot=None):
+        super().__init__()
+        self.setObjectName("guideBanner")
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(10, 8, 8, 8)
+        lay.setSpacing(8)
+
+        ico = QtWidgets.QLabel()
+        ico.setObjectName("guideIcon")
+        ico.setPixmap(icons.tool_icon(icon_name, theme.colors()["accent"], 18).pixmap(QtCore.QSize(18, 18)))
+        lay.addWidget(ico, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+        msg = QtWidgets.QLabel(text)
+        msg.setObjectName("guideText")
+        msg.setWordWrap(True)
+        lay.addWidget(msg, 1)
+
+        if action_text and action_slot is not None:
+            action = QtWidgets.QPushButton(action_text)
+            action.setObjectName("guideAction")
+            action.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            action.clicked.connect(action_slot)
+            lay.addWidget(action, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+        close = QtWidgets.QToolButton()
+        close.setObjectName("guideClose")
+        close.setText("×")
+        close.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        close.setToolTip("不再提示")
+        close.clicked.connect(self.dismissed.emit)
+        lay.addWidget(close, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+
+class ProgressSheet(QtWidgets.QDialog):
+    """Compact in-product progress sheet for batch jobs with real progress."""
+
+    canceled = QtCore.Signal()
+
+    def __init__(self, title: str, detail: str, total: int, parent=None, cancelable: bool = True):
+        super().__init__(parent)
+        self.setObjectName("progressSheet")
+        self.setWindowTitle(title)
+        self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self.setMinimumWidth(420)
+        self._canceled = False
+        self._total = max(0, int(total))
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(10)
+
+        head = QtWidgets.QHBoxLayout()
+        icon_lbl = QtWidgets.QLabel()
+        icon_lbl.setObjectName("progressIcon")
+        icon_lbl.setPixmap(icons.tool_icon("adjust", theme.colors()["accent"], 24).pixmap(QtCore.QSize(24, 24)))
+        title_lbl = QtWidgets.QLabel(title)
+        title_lbl.setObjectName("progressTitle")
+        title_lbl.setWordWrap(True)
+        head.addWidget(icon_lbl)
+        head.addWidget(title_lbl, 1)
+        lay.addLayout(head)
+
+        self.detail_label = QtWidgets.QLabel(detail)
+        self.detail_label.setObjectName("progressDetail")
+        self.detail_label.setWordWrap(True)
+        lay.addWidget(self.detail_label)
+
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setObjectName("progressBar")
+        self.bar.setRange(0, self._total)
+        self.bar.setValue(0)
+        lay.addWidget(self.bar)
+
+        foot = QtWidgets.QHBoxLayout()
+        self.counter_label = QtWidgets.QLabel("0 / %d" % self._total)
+        self.counter_label.setObjectName("progressCounter")
+        foot.addWidget(self.counter_label, 1)
+        self.cancel_btn = QtWidgets.QPushButton("取消")
+        self.cancel_btn.setVisible(cancelable)
+        self.cancel_btn.clicked.connect(self.cancel)
+        foot.addWidget(self.cancel_btn)
+        lay.addLayout(foot)
+
+    def cancel(self):
+        self._canceled = True
+        self.cancel_btn.setEnabled(False)
+        self.detail_label.setText("正在取消，已完成的文件会保留。")
+        self.canceled.emit()
+
+    def wasCanceled(self) -> bool:
+        return self._canceled
+
+    def step(self, done: int, detail: str = "", failed: int | None = None):
+        done = max(0, min(int(done), self._total))
+        self.bar.setValue(done)
+        if detail:
+            self.detail_label.setText(detail)
+        text = "%d / %d" % (done, self._total)
+        if failed is not None:
+            text += "   失败 %d" % int(failed)
+        self.counter_label.setText(text)
+        QtWidgets.QApplication.processEvents()
+
+
 class LayerRow(QtWidgets.QWidget):
-    """图层面板一行（PS 式）：👁 显隐 + 大缩略图 + 名称 + 右侧锁；双击重命名；激活层高亮。
+    """图层面板一行（PS 式）：显隐 + 大缩略图 + 名称 + 右侧锁；双击重命名；激活层高亮。
     层级调整(▲▼)/删除/勾选打组收进【右键菜单】，常用操作走面板底部图标栏（更贴 PS）。"""
 
     THUMB = 58  # PS 式大缩略图
@@ -383,25 +526,31 @@ class LayerRow(QtWidgets.QWidget):
     def _build_context_menu(self):
         ed, layer = self._editor, self._layer
         m = QtWidgets.QMenu(ed)
-        m.addAction("置顶", lambda: ed._layer_z("front", layer))
-        m.addAction("上移一层", lambda: ed._move_layer(layer, +1))
-        m.addAction("下移一层", lambda: ed._move_layer(layer, -1))
-        m.addAction("置底", lambda: ed._layer_z("back", layer))
+        c = theme.colors()
+        section = QtGui.QAction("层级", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("align_top", c["text"], 16), "置顶", lambda: ed._layer_z("front", layer))
+        m.addAction(icons.tool_icon("move", c["text"], 16), "上移一层", lambda: ed._move_layer(layer, +1))
+        m.addAction(icons.tool_icon("move", c["text"], 16), "下移一层", lambda: ed._move_layer(layer, -1))
+        m.addAction(icons.tool_icon("align_bottom", c["text"], 16), "置底", lambda: ed._layer_z("back", layer))
         m.addSeparator()
-        m.addAction("亮度 / 对比度…", ed.brightness_contrast_dialog)
+        section = QtGui.QAction("编辑", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("adjust", c["text"], 16), "亮度 / 对比度…", ed.brightness_contrast_dialog)
+        m.addAction(icons.tool_icon("text", c["text"], 16), "重命名…", lambda: ed._rename_layer(layer))
         m.addSeparator()
+        section = QtGui.QAction("分组", m); section.setEnabled(False); m.addAction(section)
         act_mark = m.addAction("取消勾选打组" if self._marked else "勾选以打组")
         act_mark.triggered.connect(lambda *_: ed._toggle_mark(layer))
-        m.addAction("所选图层打组", ed.do_group)
-        m.addAction("解组", ed.do_ungroup)
-        m.addAction("重命名…", lambda: ed._rename_layer(layer))
+        m.addAction(icons.tool_icon("group", c["text"], 16), "所选图层打组", ed.do_group)
+        m.addAction(icons.tool_icon("ungroup", c["text"], 16), "解组", ed.do_ungroup)
         if layer.get("kind") != "vector":  # 非破坏图层蒙版（栅格/图片/文字层）
             m.addSeparator()
-            m.addAction("从选区生成蒙版", lambda: ed._mask_from_selection(layer))
+            section = QtGui.QAction("蒙版", m); section.setEnabled(False); m.addAction(section)
+            m.addAction(icons.tool_icon("mask", c["text"], 16), "从选区生成蒙版", lambda: ed._mask_from_selection(layer))
             if layer.get("mask") is not None:
-                m.addAction("删除蒙版", lambda: ed._delete_mask(layer))
+                m.addAction(icons.tool_icon("trash", c["danger"], 16), "删除蒙版", lambda: ed._delete_mask(layer))
         m.addSeparator()
-        m.addAction("删除该层", lambda: ed._delete_specific_layer(layer))
+        section = QtGui.QAction("危险操作", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("trash", c["danger"], 16), "删除该层", lambda: ed._delete_specific_layer(layer))
         return m
 
     def _show_context_menu(self, global_pos):
@@ -433,8 +582,12 @@ class GroupHeaderRow(QtWidgets.QWidget):
         c = theme.colors()
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(6, 3, 6, 3); lay.setSpacing(5)
-        fold = QtWidgets.QToolButton(); fold.setAutoRaise(True); fold.setFixedSize(20, 22)
-        fold.setText("▸" if collapsed else "▾"); fold.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        fold = QtWidgets.QToolButton(); fold.setAutoRaise(True); fold.setFixedSize(22, 24)
+        fold.setObjectName("iconButton")
+        fold.setIconSize(QtCore.QSize(15, 15))
+        fold.setIcon(icons.tool_icon("chevron_right" if collapsed else "chevron_down", c["text"], 16))
+        fold.setToolTip("展开 / 折叠组")
+        fold.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         fold.clicked.connect(lambda *_: editor._toggle_collapse(gid))
         eye = QtWidgets.QToolButton(); eye.setAutoRaise(True); eye.setCheckable(True); eye.setChecked(any_visible)
         eye.setIconSize(QtCore.QSize(20, 20)); eye.setFixedSize(28, 30)
@@ -447,10 +600,15 @@ class GroupHeaderRow(QtWidgets.QWidget):
         lock.toggled.connect(lambda v: lock.setIcon(icons.lock_icon(v, theme.colors()["text"])))
         lock.clicked.connect(lambda *_: editor._set_group_locked(gid, lock.isChecked()))
         lock.setToolTip("锁定/解锁该组全部图层")
-        lbl = QtWidgets.QLabel(f"▣ {name} ({count})"); lbl.setObjectName("groupName")  # 加粗走主题 QSS
-        lay.addWidget(fold); lay.addWidget(eye); lay.addWidget(lbl, 1); lay.addWidget(lock)
+        folder_lbl = QtWidgets.QLabel()
+        folder_lbl.setPixmap(icons.tool_icon("folder", c["accent"], 18).pixmap(QtCore.QSize(18, 18)))
+        folder_lbl.setFixedSize(20, 22)
+        folder_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        lbl = QtWidgets.QLabel(name); lbl.setObjectName("groupName")  # 加粗走主题 QSS
+        meta = QtWidgets.QLabel(f"{count} 层"); meta.setObjectName("groupMeta")
+        lay.addWidget(fold); lay.addWidget(eye); lay.addWidget(folder_lbl); lay.addWidget(lbl, 1); lay.addWidget(meta); lay.addWidget(lock)
         self.setProperty("active", "true" if active else "false")
-        for child in (fold, eye, lbl, lock):
+        for child in (fold, eye, folder_lbl, lbl, meta, lock):
             child.installEventFilter(self)
         # 背景/圆角走主题 QSS(#groupHeader)，不再内联 → 切深浅主题自动跟随
 
@@ -608,14 +766,18 @@ class GroupHeaderRow(QtWidgets.QWidget):
         any_visible = any(l.get("visible", True) for l in all_members)
         any_locked = any(l.get("locked", False) for l in all_members)
         m = QtWidgets.QMenu(ed)
-        m.addAction("展开组" if collapsed else "折叠组", lambda: ed._toggle_collapse(gid))
-        m.addAction("显示组" if not any_visible else "隐藏组", lambda: ed._set_group_visible(gid, not any_visible))
-        m.addAction("解锁组" if any_locked else "锁定组", lambda: ed._set_group_locked(gid, not any_locked))
+        c = theme.colors()
+        section = QtGui.QAction("组状态", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("group", c["text"], 16), "展开组" if collapsed else "折叠组", lambda: ed._toggle_collapse(gid))
+        m.addAction(icons.eye_icon(not any_visible, c["text"]), "显示组" if not any_visible else "隐藏组", lambda: ed._set_group_visible(gid, not any_visible))
+        m.addAction(icons.lock_icon(not any_locked, c["text"]), "解锁组" if any_locked else "锁定组", lambda: ed._set_group_locked(gid, not any_locked))
         m.addSeparator()
-        m.addAction("重命名组…", lambda: ed._rename_group(gid))
-        m.addAction("解组（保留图层）", lambda: ed._ungroup_gid(gid))
+        section = QtGui.QAction("编辑", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("text", c["text"], 16), "重命名组…", lambda: ed._rename_group(gid))
+        m.addAction(icons.tool_icon("ungroup", c["text"], 16), "解组（保留图层）", lambda: ed._ungroup_gid(gid))
         m.addSeparator()
-        m.addAction("删除组及内容", lambda: ed._delete_group(gid))
+        section = QtGui.QAction("危险操作", m); section.setEnabled(False); m.addAction(section)
+        m.addAction(icons.tool_icon("trash", c["danger"], 16), "删除组及内容", lambda: ed._delete_group(gid))
         return m
 
     def _show_context_menu(self, global_pos):
@@ -699,12 +861,13 @@ class AssetListWidget(QtWidgets.QListWidget):
 
 
 class PluginStar(QtWidgets.QToolButton):
-    """右侧悬浮的 ✨ 插件星：点击开/关插件面板，可拖动（移植 ai.js 的 ✨ 轨道图标交互）。"""
+    """右侧悬浮插件按钮：点击开/关插件面板，可拖动。"""
 
     def __init__(self, parent, on_click):
         super().__init__(parent)
-        self.setText("✨")
         self.setToolTip("插件 · AI 生成（点击开/关，可拖动）")
+        self.setIcon(icons.tool_icon("star", theme.colors()["on_accent"], 22))
+        self.setIconSize(QtCore.QSize(22, 22))
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(38, 38)
         self.setObjectName("pluginStar")  # 配色走主题 QSS(#pluginStar)，切深浅主题随强调色变
@@ -812,6 +975,7 @@ class DragLayerList(QtWidgets.QListWidget):
         self._drag_uid = None  # 拖拽起手记下被拖行的 uid（不靠 currentItem，避免 _refresh_layers 重建后失准）
         self._ps_drag_label = None
         self._ps_drop_line = None
+        self._ps_drag_row = None
         self._ps_hotspot = QtCore.QPoint(18, 18)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
@@ -868,24 +1032,39 @@ class DragLayerList(QtWidgets.QListWidget):
 
     def begin_ps_drag(self, row: QtWidgets.QWidget, global_pos: QtCore.QPoint):
         """PS-like layer drag feedback: a floating row snapshot plus an insertion line."""
+        if self._ps_drag_row is not None and self._ps_drag_row is not row:
+            self._set_drag_row_state(self._ps_drag_row, False)
+        self._ps_drag_row = row
+        self._set_drag_row_state(row, True)
         if self._ps_drag_label is None:
             self._ps_drag_label = QtWidgets.QLabel(self.viewport())
             self._ps_drag_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             eff = QtWidgets.QGraphicsOpacityEffect(self._ps_drag_label)
-            eff.setOpacity(0.78)
+            eff.setOpacity(0.9)
             self._ps_drag_label.setGraphicsEffect(eff)
         if self._ps_drop_line is None:
             self._ps_drop_line = QtWidgets.QFrame(self.viewport())
             self._ps_drop_line.setObjectName("layerDropLine")
             self._ps_drop_line.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            self._ps_drop_line.setFixedHeight(3)
+            self._ps_drop_line.setFixedHeight(4)
         pm = row.grab()
-        self._ps_drag_label.setPixmap(pm)
-        self._ps_drag_label.resize(pm.size())
+        frame = 5
+        floating = QtGui.QPixmap(pm.width() + frame * 2, pm.height() + frame * 2)
+        floating.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(floating)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        c = theme.colors()
+        p.setPen(QtGui.QPen(QtGui.QColor(c["focus_ring"]), 1.2))
+        p.setBrush(QtGui.QColor(c["surface_raised"]))
+        p.drawRoundedRect(QtCore.QRectF(0.5, 0.5, floating.width() - 1, floating.height() - 1), 9, 9)
+        p.drawPixmap(frame, frame, pm)
+        p.end()
+        self._ps_drag_label.setPixmap(floating)
+        self._ps_drag_label.resize(floating.size())
         local = row.mapFromGlobal(global_pos)
         self._ps_hotspot = QtCore.QPoint(
-            max(0, min(local.x(), max(0, row.width() - 1))),
-            max(0, min(local.y(), max(0, row.height() - 1))),
+            frame + max(0, min(local.x(), max(0, row.width() - 1))),
+            frame + max(0, min(local.y(), max(0, row.height() - 1))),
         )
         self._ps_drag_label.raise_()
         self._ps_drop_line.raise_()
@@ -904,16 +1083,27 @@ class DragLayerList(QtWidgets.QListWidget):
                 self._ps_drop_line.hide()
             return
         x = 7
-        self._ps_drop_line.setGeometry(x, max(0, y - 1), max(1, self.viewport().width() - x * 2), 3)
+        h = self._ps_drop_line.height() if self._ps_drop_line is not None else 4
+        self._ps_drop_line.setGeometry(x, max(0, y - h // 2), max(1, self.viewport().width() - x * 2), h)
         self._ps_drop_line.raise_()
         self._ps_drop_line.show()
 
     def end_ps_drag(self):
+        if self._ps_drag_row is not None:
+            self._set_drag_row_state(self._ps_drag_row, False)
+            self._ps_drag_row = None
         if self._ps_drag_label is not None:
             self._ps_drag_label.hide()
             self._ps_drag_label.clear()
         if self._ps_drop_line is not None:
             self._ps_drop_line.hide()
+
+    @staticmethod
+    def _set_drag_row_state(row: QtWidgets.QWidget, dragging: bool):
+        row.setProperty("dragging", dragging)
+        row.style().unpolish(row)
+        row.style().polish(row)
+        row.update()
 
     def _drop_line_y(self, pos: QtCore.QPoint):
         rows = []
@@ -1073,7 +1263,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._hist_index: int = -1   # -1 = 尚无历史（等价旧 _history 为空）
         self._suspend_history = False
         self._seg_worker = None          # AI 抠图/拆解后台线程（仿 ai_panel 的 self._worker=None）
-        self._seg_dialog = None          # AI 抠图忙碌进度弹窗（QProgressDialog；done/取消/失败三路都要关）
+        self._seg_dialog = None          # AI 抠图忙碌进度面板（ProgressSheet；done/取消/失败三路都要关）
         self._seg_epoch = 0              # 辨别"被取消/被新一次抠图顶替的旧 worker"（取消时自增使在途 worker 失效）
         # 选区引擎状态
         self._sel_mode = "new"           # new / add / subtract
@@ -1296,35 +1486,99 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         # 禁用主窗口右键弹出的"工具栏/停靠切换"菜单；面板显隐改用「视图」菜单。
         return None
 
+    def _ask_text(self, title: str, label: str, text: str = ""):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setObjectName("toolDialog")
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+        title_lbl = QtWidgets.QLabel(title)
+        title_lbl.setObjectName("sectionTitle")
+        lay.addWidget(title_lbl)
+        hint = QtWidgets.QLabel(label)
+        hint.setObjectName("hint")
+        lay.addWidget(hint)
+        edit = QtWidgets.QLineEdit(text)
+        edit.selectAll()
+        lay.addWidget(edit)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        dlg.setMinimumWidth(320)
+        edit.setFocus()
+        ok = dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted
+        return edit.text(), ok
+
+    def _ask_measure_scale(self, px_len: float):
+        dlg = QtWidgets.QDialog(self)
+        dlg.setObjectName("toolDialog")
+        dlg.setWindowTitle("设测量比例")
+        dlg.setModal(True)
+        lay = QtWidgets.QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(10)
+        title_lbl = QtWidgets.QLabel("设测量比例")
+        title_lbl.setObjectName("sectionTitle")
+        lay.addWidget(title_lbl)
+        hint = QtWidgets.QLabel(f"当前测量线 = {px_len:.1f} px，代表多少真实单位？")
+        hint.setObjectName("hint")
+        lay.addWidget(hint)
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        value = QtWidgets.QDoubleSpinBox()
+        value.setRange(1e-9, 1e9)
+        value.setDecimals(6)
+        value.setValue(1.0)
+        value.setSingleStep(1.0)
+        unit = QtWidgets.QLineEdit("µm")
+        form.addRow("真实长度", value)
+        form.addRow("单位", unit)
+        lay.addLayout(form)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        dlg.setMinimumWidth(360)
+        value.setFocus()
+        ok = dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted
+        return value.value(), (unit.text().strip() or "u"), ok
+
     def _apply_ads_theme(self):  # ADS 面板样式跟随 app 主题：默认样式 + 主题色覆盖
         self.dock_manager.setStyleSheet(self._ads_base_css + theme.ads_qss(theme.colors()))
 
     # ---------- 菜单 ----------
     def _build_menu(self):
+        c = theme.colors()["text"]
         m = self.menuBar().addMenu("文件")
-        m.addAction("新建空白…", self.new_blank).setShortcut("Ctrl+N")
-        m.addAction("画布尺寸…（保留内容）", self.canvas_size_dialog)
+        m.addAction(icons.tool_icon("new_layer", c, 16), "新建空白…", self.new_blank).setShortcut("Ctrl+N")
+        m.addAction(icons.tool_icon("rect", c, 16), "画布尺寸…（保留内容）", self.canvas_size_dialog)
         m.addSeparator()
-        m.addAction("导入图片…", self.import_image).setShortcut("Ctrl+O")
-        m.addAction("导入元素…", self.import_element)
-        m.addAction("导入矢量图 (SVG)…", self.import_svg)
-        m.addAction("导入 PDF（矢量）…", self.import_pdf)
-        m.addAction("新建透明图层", self.new_transparent_layer).setShortcut("Ctrl+Shift+N")
+        m.addAction(icons.tool_icon("folder", c, 16), "导入图片…", self.import_image).setShortcut("Ctrl+O")
+        m.addAction(icons.tool_icon("move", c, 16), "导入元素…", self.import_element)
+        m.addAction(icons.tool_icon("pen", c, 16), "导入矢量图 (SVG)…", self.import_svg)
+        m.addAction(icons.tool_icon("new_layer", c, 16), "导入 PDF（矢量）…", self.import_pdf)
+        m.addAction(icons.tool_icon("new_layer", c, 16), "新建透明图层", self.new_transparent_layer).setShortcut("Ctrl+Shift+N")
         m.addSeparator()
-        m.addAction("导出 PNG…", self.export_png).setShortcut("Ctrl+E")
-        m.addAction("导出 TIFF…（投稿）", self.export_tiff)
-        m.addAction("导出 SVG…", self.export_svg)
-        m.addAction("导出 PDF（矢量）…", self.export_pdf).setShortcut("Ctrl+Shift+E")
+        m.addAction(icons.tool_icon("download", c, 16), "导出 PNG…", self.export_png).setShortcut("Ctrl+E")
+        m.addAction(icons.tool_icon("download", c, 16), "导出 TIFF…（投稿）", self.export_tiff)
+        m.addAction(icons.tool_icon("download", c, 16), "导出 SVG…", self.export_svg)
+        m.addAction(icons.tool_icon("download", c, 16), "导出 PDF（矢量）…", self.export_pdf).setShortcut("Ctrl+Shift+E")
         m.addSeparator()
-        m.addAction("保存工程…", self.save_project).setShortcut("Ctrl+S")
-        m.addAction("加载工程…", self.load_project).setShortcut("Ctrl+Shift+O")
+        m.addAction(icons.tool_icon("save", c, 16), "保存工程…", self.save_project).setShortcut("Ctrl+S")
+        m.addAction(icons.tool_icon("folder", c, 16), "加载工程…", self.load_project).setShortcut("Ctrl+Shift+O")
         m.addSeparator()
-        m.addAction("适应窗口", self.fit_view).setShortcut("Ctrl+0")
-        self._debug_menu = m.addMenu("调试")  # 开发工具收进子菜单，不混在文件操作里
-        self._debug_menu.addAction("压力测试：放 N 个图层并连续动", self.stress_test)
+        m.addAction(icons.tool_icon("zoom", c, 16), "适应窗口", self.fit_view).setShortcut("Ctrl+0")
+        self._debug_menu = m.addMenu(icons.tool_icon("settings", c, 16), "调试")  # 开发工具收进子菜单，不混在文件操作里
+        self._debug_menu.addAction(icons.tool_icon("clock", c, 16), "压力测试：放 N 个图层并连续动", self.stress_test)
 
         em = self.menuBar().addMenu("编辑")
-        c = theme.colors()["text"]
         self._undo_act = em.addAction(icons.tool_icon("undo", c), "撤销", self.undo)
         self._undo_act.setShortcut("Ctrl+Z"); self._undo_act.setToolTip("撤销 (Ctrl+Z)")
         self._redo_act = em.addAction(icons.tool_icon("redo", c), "重做", self.redo)
@@ -1333,30 +1587,30 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._undo_act.setEnabled(False)
         self._redo_act.setEnabled(False)
         em.addSeparator()
-        re_act = em.addAction("重新选择", self.reselect)  # PS Reselect：恢复上次取消的选区
+        re_act = em.addAction(icons.tool_icon("rectsel", c, 16), "重新选择", self.reselect)  # PS Reselect：恢复上次取消的选区
         re_act.setShortcut("Ctrl+Shift+D")
         re_act.setToolTip("重新选择：恢复最后一次取消掉的选区 (Ctrl+Shift+D)")
         em.addSeparator()
         # Ctrl+C/Ctrl+V 不在此注册快捷键（会抢占就地编辑文字时的复制粘贴）→ 实际按键在 CanvasView.keyPressEvent 处理
-        cp_act = em.addAction("复制图层 (Ctrl+C)", self.copy_to_clipboard)
+        cp_act = em.addAction(icons.tool_icon("copy", c, 16), "复制图层 (Ctrl+C)", self.copy_to_clipboard)
         cp_act.setToolTip("把当前图层复制为图片到剪贴板（可粘回 / 粘到外部应用）")
-        pa_act = em.addAction("粘贴 (Ctrl+V)", self.paste_from_clipboard)
+        pa_act = em.addAction(icons.tool_icon("paste", c, 16), "粘贴 (Ctrl+V)", self.paste_from_clipboard)
         pa_act.setToolTip("把剪贴板里的图片作为新图层粘到画布（外部复制的图也能粘进来）")
         em.addSeparator()
-        zsub = em.addMenu("图层层级")  # 置顶/上移/下移/置底（作用活动层）
-        _za = zsub.addAction("置顶", lambda: self._layer_z("front")); _za.setShortcut("Ctrl+Shift+]")
-        _za = zsub.addAction("上移一层", lambda: self._layer_z("forward")); _za.setShortcut("Ctrl+]")
-        _za = zsub.addAction("下移一层", lambda: self._layer_z("backward")); _za.setShortcut("Ctrl+[")
-        _za = zsub.addAction("置底", lambda: self._layer_z("back")); _za.setShortcut("Ctrl+Shift+[")
+        zsub = em.addMenu(icons.tool_icon("group", c, 16), "图层层级")  # 置顶/上移/下移/置底（作用活动层）
+        _za = zsub.addAction(icons.tool_icon("align_top", c, 16), "置顶", lambda: self._layer_z("front")); _za.setShortcut("Ctrl+Shift+]")
+        _za = zsub.addAction(icons.tool_icon("move", c, 16), "上移一层", lambda: self._layer_z("forward")); _za.setShortcut("Ctrl+]")
+        _za = zsub.addAction(icons.tool_icon("move", c, 16), "下移一层", lambda: self._layer_z("backward")); _za.setShortcut("Ctrl+[")
+        _za = zsub.addAction(icons.tool_icon("align_bottom", c, 16), "置底", lambda: self._layer_z("back")); _za.setShortcut("Ctrl+Shift+[")
 
         img_menu = self.menuBar().addMenu("图像")
-        img_menu.addAction("亮度/对比度…", self.brightness_contrast_dialog)
+        img_menu.addAction(icons.tool_icon("adjust", c, 16), "亮度/对比度…", self.brightness_contrast_dialog)
         img_menu.addSeparator()
         # 翻转/旋转：作用于选中的矢量元素，或活动图层（矢量绕中心 QTransform；栅格转像素）
-        img_menu.addAction("水平翻转", lambda: self._flip_objects(True))
-        img_menu.addAction("垂直翻转", lambda: self._flip_objects(False))
-        img_menu.addAction("顺时针旋转 90°", lambda: self._rotate_objects(90))
-        img_menu.addAction("逆时针旋转 90°", lambda: self._rotate_objects(270))
+        img_menu.addAction(icons.tool_icon("move", c, 16), "水平翻转", lambda: self._flip_objects(True))
+        img_menu.addAction(icons.tool_icon("move", c, 16), "垂直翻转", lambda: self._flip_objects(False))
+        img_menu.addAction(icons.tool_icon("redo", c, 16), "顺时针旋转 90°", lambda: self._rotate_objects(90))
+        img_menu.addAction(icons.tool_icon("undo", c, 16), "逆时针旋转 90°", lambda: self._rotate_objects(270))
 
         view = self.menuBar().addMenu("视图")
         self._view_menu = view
@@ -1364,7 +1618,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         tgrp.setExclusive(True)
         self._theme_actions = {}
         for name, label in (("dark", "深色主题"), ("light", "浅色主题")):
-            a = QtGui.QAction(label, self, checkable=True)
+            a = QtGui.QAction(icons.tool_icon("star", c, 16), label, self, checkable=True)
             a.setChecked(theme.current() == name)
             a.triggered.connect(lambda _=False, n=name: self._switch_theme(n))
             tgrp.addAction(a)
@@ -1372,34 +1626,34 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._theme_actions[name] = a
 
         view.addSeparator()
-        self._act_rulers = QtGui.QAction("显示标尺", self, checkable=True)
+        self._act_rulers = QtGui.QAction(icons.tool_icon("measure", c, 16), "显示标尺", self, checkable=True)
         self._act_rulers.setChecked(config.get_show_rulers())
         self._act_rulers.setShortcut("Ctrl+R")
         self._act_rulers.triggered.connect(self._toggle_rulers)
         view.addAction(self._act_rulers)
-        self._act_guides = QtGui.QAction("显示参考线", self, checkable=True)
+        self._act_guides = QtGui.QAction(icons.tool_icon("rectsel", c, 16), "显示参考线", self, checkable=True)
         self._act_guides.setChecked(True)
         self._act_guides.triggered.connect(self._toggle_guides)
         view.addAction(self._act_guides)
         view.addSeparator()
         self._snap_grid = False
-        self._act_grid = QtGui.QAction("显示网格", self, checkable=True)
+        self._act_grid = QtGui.QAction(icons.tool_icon("rect", c, 16), "显示网格", self, checkable=True)
         self._act_grid.setShortcut("Ctrl+'")
         self._act_grid.triggered.connect(lambda on: self.view.set_grid(on))
         view.addAction(self._act_grid)
-        self._act_snapgrid = QtGui.QAction("吸附到网格", self, checkable=True)
+        self._act_snapgrid = QtGui.QAction(icons.tool_icon("wand", c, 16), "吸附到网格", self, checkable=True)
         self._act_snapgrid.triggered.connect(lambda on: setattr(self, "_snap_grid", bool(on)))
         view.addAction(self._act_snapgrid)
-        gsub = view.addMenu("网格大小")
+        gsub = view.addMenu(icons.tool_icon("rect", c, 16), "网格大小")
         ggrp = QtGui.QActionGroup(self); ggrp.setExclusive(True)
         for _px in (10, 20, 25, 50):
             _ga = QtGui.QAction("%d px" % _px, self, checkable=True); _ga.setChecked(_px == 20)
             _ga.triggered.connect(lambda _=False, p=_px: self.view.set_grid_size(p))
             ggrp.addAction(_ga); gsub.addAction(_ga)
-        view.addAction("清除参考线", self._clear_guides)
+        view.addAction(icons.tool_icon("trash", c, 16), "清除参考线", self._clear_guides)
         view.addSeparator()
         # FPS 性能浮标：默认关，放「视图」菜单里方便随时勾选/取消（诊断卡顿用）
-        self._fps_act = QtGui.QAction("显示 FPS 性能浮标", self, checkable=True)
+        self._fps_act = QtGui.QAction(icons.tool_icon("clock", c, 16), "显示 FPS 性能浮标", self, checkable=True)
         self._fps_act.setChecked(False)
         self._fps_act.setToolTip("在画布左上角显示实时帧率，用于诊断卡顿；默认关闭，取消勾选即隐藏")
         self._fps_act.toggled.connect(self._toggle_fps_hud)
@@ -1407,17 +1661,18 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
         # 「插件」菜单：可扩展的增效工具目录（仿 PS 增效工具）。后期新工具加进 self._plugins 即可。
         plug = self.menuBar().addMenu("插件")
+        tc = theme.colors()
         self._plugins = [
-            ("✨ AI 生成 / 对话", "生成式 AI 绘图（文生图/图生图）+ AI 对话生成提示词（同一浮窗标签切换）", self._toggle_ai_panel),
-            ("🔬 WB 灰度定量分析…", "Western blot 条带灰度定量（对齐 ImageJ Gel Analyzer）：框泳道/带→IntDen/峰面积/归一化/导出CSV", self._toggle_wb_panel),
+            (icons.tool_icon("star", tc["text"], 16), "AI 生成 / 对话", "生成式 AI 绘图（文生图/图生图）+ AI 对话生成提示词（同一浮窗标签切换）", self._toggle_ai_panel),
+            (icons.tool_icon("measure", tc["text"], 16), "WB 灰度定量分析…", "Western blot 条带灰度定量（对齐 ImageJ Gel Analyzer）：框泳道/带→IntDen/峰面积/归一化/导出CSV", self._toggle_wb_panel),
         ]
-        for name, tip, cb in self._plugins:
-            act = plug.addAction(name, cb); act.setToolTip(tip)
+        for icon, name, tip, cb in self._plugins:
+            act = plug.addAction(icon, name, cb); act.setToolTip(tip)
         plug.addSeparator()
-        act_seg = plug.addAction("AI 抠图设置…", self._ai_seg_settings_dialog)
+        act_seg = plug.addAction(icons.tool_icon("settings", tc["text"], 16), "AI 抠图设置…", self._ai_seg_settings_dialog)
         act_seg.setToolTip("配置 AI 分割/抠图后端（HTTP image-edit 兼容 / 本地 rembg）")
         plug.addSeparator()
-        more = plug.addAction("（更多工具将并入此处…）"); more.setEnabled(False)
+        more = plug.addAction(icons.tool_icon("settings", tc["muted"], 16), "更多工具将并入此处…"); more.setEnabled(False)
 
     def _toggle_wb_panel(self):
         # 开/关 WB 灰度定量浮窗（插件菜单）。懒加载，关闭=隐藏保留状态。
@@ -1480,6 +1735,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if hasattr(self, "_zoom_in_btn"):
             self._zoom_in_btn.setIcon(icons.tool_icon("zoom", c))
             self._zoom_out_btn.setIcon(icons.tool_icon("zoom_out", c))
+        if hasattr(self, "_plugin_star"):
+            self._plugin_star.setIcon(icons.tool_icon("star", theme.colors()["on_accent"], 22))
+        if hasattr(self, "asset_preview_fav"):
+            self._sync_preview_actions(bool(getattr(self, "_asset_preview_path", "")), getattr(self, "_asset_preview_path", ""))
         if hasattr(self, "dock_manager"):
             self._apply_ads_theme()  # ADS 面板深/浅跟随
         if hasattr(self, "_ruler_corner"):  # 标尺角块静态色跟随主题；刻度色 paintEvent 内自取，sync 即可
@@ -1550,6 +1809,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
     @staticmethod
     def _opts_page():
         w = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(w)
+        w.setObjectName("optionPage")
         h.setContentsMargins(6, 0, 6, 0); h.setSpacing(8)
         return w, h
 
@@ -1560,16 +1820,39 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         bar.setObjectName("optionsBar")
         # PS/AI 式单条上下文选项栏：删除原「视图」栏后这是唯一的顶部 QToolBar（不再 addToolBarBreak 换行）。
         bar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)  # 仅影响直接 addAction 挂到 bar 的撤销/重做
-        bar.setIconSize(QtCore.QSize(16, 16))                                  # icon-only 紧凑（PS 工具栏图标风）
+        bar.setIconSize(QtCore.QSize(18, 18))                                  # icon-only 紧凑（PS 工具栏图标风）
+        bar.setFixedHeight(44)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, bar)
         # 撤销/重做：选项栏最左侧 icon-only 紧凑按钮（复用菜单同一 _undo_act/_redo_act，enable 态/快捷键全自动一致）
         bar.addAction(self._undo_act)
         bar.addAction(self._redo_act)
-        bar.addSeparator()
+        self._option_shell = QtWidgets.QFrame()
+        self._option_shell.setObjectName("optionsShell")
+        shell_lay = QtWidgets.QHBoxLayout(self._option_shell)
+        shell_lay.setContentsMargins(10, 0, 10, 0)
+        shell_lay.setSpacing(10)
+        self._option_tool_label = QtWidgets.QLabel("移动")
+        self._option_tool_label.setObjectName("optionToolTitle")
+        self._option_tool_label.setMinimumWidth(72)
+        shell_lay.addWidget(self._option_tool_label)
+        div = QtWidgets.QFrame()
+        div.setObjectName("optionDivider")
+        div.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+        shell_lay.addWidget(div)
         self._opts_stack = QtWidgets.QStackedWidget()
+        self._opts_stack.setObjectName("optionsStack")
         self._opts_stack.setFixedHeight(34)
-        bar.addWidget(self._opts_stack)
+        shell_lay.addWidget(self._opts_stack, 1)
+        bar.addWidget(self._option_shell)
         self._opt_pages: dict[str, int] = {}
+        self._tool_option_titles = {
+            "move": "移动", "hand": "抓手", "rectsel": "矩形选框", "lasso": "套索",
+            "brush": "选区画笔", "wand": "魔棒", "rect": "矩形抠出", "erase": "矩形挖洞",
+            "crop": "裁剪", "draw": "画笔", "eraser": "橡皮擦", "text": "文字",
+            "zoom": "缩放", "measure": "测量", "node": "锚点", "pen": "钢笔",
+            "sh_rect": "矩形", "sh_ellipse": "椭圆", "sh_line": "直线", "sh_arrow": "箭头",
+            "connector": "连接线",
+        }
 
         def add_page(name: str, w: QtWidgets.QWidget):
             self._opt_pages[name] = self._opts_stack.addWidget(w)
@@ -1730,11 +2013,17 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
         # 选项栏所有按钮统一手型光标
         for btn in self._opts_stack.findChildren(QtWidgets.QAbstractButton):
+            if not btn.objectName():
+                btn.setObjectName("optionButton")
             btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        for lbl in self._opts_stack.findChildren(QtWidgets.QLabel):
+            if not lbl.objectName():
+                lbl.setObjectName("optionLabel")
 
     # ---------- 左：竖排工具栏 ----------
     def _build_left_tools(self):
         tb = QtWidgets.QToolBar("工具")
+        tb.setObjectName("leftToolBar")
         tb.setOrientation(QtCore.Qt.Orientation.Vertical)
         tb.setMovable(False)
         tb.setFloatable(False)
@@ -1827,6 +2116,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
                     continue
                 if slot not in self._flyout_btns:  # 槽内第一个成员处插入 flyout 按钮（位置=该槽首工具的位置）
                     btn = FlyoutToolButton(flyout_members[slot], theme.colors()["text"])
+                    btn.setObjectName("flyoutToolButton")
                     btn.setIconSize(QtCore.QSize(22, 22))
                     self._flyout_btns[slot] = btn
                     tb.addWidget(btn)
@@ -1847,6 +2137,29 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         """统一的面板提示标签：objectName=hint → 走主题 QSS(QLabel#hint)，深浅主题自动跟随、对比达标。"""
         lbl = QtWidgets.QLabel(text); lbl.setObjectName("hint"); lbl.setWordWrap(True)
         return lbl
+
+    def _guide_seen(self, key: str) -> bool:
+        v = QtCore.QSettings("NanoPro", "SciEditQt").value(f"guide/{key}", "0")
+        return str(v).lower() in ("1", "true", "yes")
+
+    def _mark_guide_seen(self, key: str):
+        QtCore.QSettings("NanoPro", "SciEditQt").setValue(f"guide/{key}", "1")
+
+    def _make_guide(self, key: str, icon_name: str, text: str, action_text: str = "", action_slot=None) -> GuideBanner:
+        banner = GuideBanner(icon_name, text, action_text, action_slot)
+        banner.setVisible(not self._guide_seen(key))
+        banner.dismissed.connect(lambda k=key, b=banner: self._dismiss_guide(k, b))
+        return banner
+
+    def _dismiss_guide(self, key: str, banner: QtWidgets.QWidget):
+        self._mark_guide_seen(key)
+        banner.hide()
+
+    def _complete_guide(self, key: str, attr: str):
+        banner = getattr(self, attr, None)
+        if banner is not None and banner.isVisible():
+            self._mark_guide_seen(key)
+            banner.hide()
 
     # ---------- 右：功能面板 ----------
     def _build_right_dock(self):
@@ -1977,25 +2290,47 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         b_newl.clicked.connect(self.new_white_layer)
         ltop.addWidget(b_newl, 1)  # 打组/解组已移到下方 PS 式底部图标栏
         ll.addLayout(ltop)
+        self.layer_guide = self._make_guide(
+            "layer_panel", "move",
+            "图层行可以直接拖拽调整上下层；Shift/Ctrl 多选后可打组，右键有层级、蒙版和删除。",
+            "", None)
+        ll.addWidget(self.layer_guide)
         # 对齐/分布按钮已移到顶部「视图」工具栏（PS 选项栏风格）；图层面板只保留多选用于对齐
         self.layer_list = DragLayerList(self); self.layer_list.setObjectName("layerList")  # QSS:图层行自绘高亮,选中态透明；支持拖拽排序
+        self.layer_list.setToolTip("点选高亮；双击重命名；拖拽行调层级；右键可上/下移、勾选打组、删除、蒙版；隐藏层不导出。")
         self.layer_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)  # Ctrl/Shift 多选用于对齐
         self.layer_list.currentRowChanged.connect(self._on_layer_row)
         self.layer_list.itemSelectionChanged.connect(self._on_layer_selection_changed)
-        self.layer_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 行宽=面板宽,✕不被挤出
-        ll.addWidget(self.layer_list, 1)
+        self.layer_list.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 行宽=面板宽，右侧控件不被挤出
+        self.layer_stack = QtWidgets.QStackedWidget()
+        self.layer_empty = EmptyState(
+            "new_layer", "还没有图层", "新建图层或导入图片后，图层会显示在这里。", "新建白色图层", self.new_white_layer)
+        self.layer_stack.addWidget(self.layer_empty)
+        self.layer_stack.addWidget(self.layer_list)
+        ll.addWidget(self.layer_stack, 1)
+
+        self.layer_control_deck = QtWidgets.QFrame()
+        self.layer_control_deck.setObjectName("layerControlDeck")
+        _lcd = QtWidgets.QVBoxLayout(self.layer_control_deck)
+        _lcd.setContentsMargins(8, 8, 8, 8)
+        _lcd.setSpacing(7)
         # —— 不透明度滑块（作用于当前激活层；滑动预览，松手入历史，仿亮度/对比度）——
         op_row = QtWidgets.QHBoxLayout()
-        op_row.addWidget(QtWidgets.QLabel("不透明度"))
+        op_lbl = QtWidgets.QLabel("不透明度")
+        op_lbl.setObjectName("layerControlLabel")
+        op_row.addWidget(op_lbl)
         self.opacity_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.opacity_slider.setObjectName("layerOpacitySlider")
         self.opacity_slider.setRange(0, 100); self.opacity_slider.setValue(100)
         self.opacity_slider.setToolTip("当前激活图层的整体不透明度（0=全透明，100=不透明）")
-        self.opacity_lbl = QtWidgets.QLabel("100%"); self.opacity_lbl.setMinimumWidth(40)
+        self.opacity_lbl = QtWidgets.QLabel("100%")
+        self.opacity_lbl.setObjectName("layerOpacityValue")
+        self.opacity_lbl.setMinimumWidth(40)
         self.opacity_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.opacity_slider.valueChanged.connect(self._on_opacity_preview)   # 滑动预览（不入历史）
         self.opacity_slider.sliderReleased.connect(self._on_opacity_commit)  # 松手提交（入历史）
         op_row.addWidget(self.opacity_slider, 1); op_row.addWidget(self.opacity_lbl)
-        ll.addLayout(op_row)
+        _lcd.addLayout(op_row)
         # —— PS 式底部图标工具栏：新建层 / 删除当前层 / 打组 / 解组 / 亮度对比度 ——
         bbar = QtWidgets.QHBoxLayout(); bbar.setSpacing(2)
         tc = theme.colors()["text"]
@@ -2010,21 +2345,27 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             tbtn = QtWidgets.QToolButton()
             tbtn.setObjectName("layerAction")
             tbtn.setText(_text)
-            tbtn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            tbtn.setIcon(icons.tool_icon(_ic, tc)); tbtn.setIconSize(QtCore.QSize(22, 22))
-            tbtn.setFixedSize(46, 44)
+            tbtn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+            _icon_color = theme.colors()["danger"] if _ic == "trash" else tc
+            tbtn.setIcon(icons.tool_icon(_ic, _icon_color)); tbtn.setIconSize(QtCore.QSize(22, 22))
+            tbtn.setFixedSize(32, 32)
             tbtn.setAutoRaise(True); tbtn.setToolTip(_tip)
+            tbtn.setAccessibleName(_text)
+            if _ic == "trash":
+                tbtn.setProperty("danger", True)
             tbtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             tbtn.clicked.connect(lambda _=False, fn=_slot: fn())
             bbar.addWidget(tbtn)
         bbar.addStretch(1)
-        ll.addLayout(bbar)
+        _lcd.addLayout(bbar)
         exp_row = QtWidgets.QHBoxLayout()
-        b_expng = QtWidgets.QPushButton("导出 PNG…"); b_expng.setProperty("primary", True)
+        b_expng = QtWidgets.QPushButton("导出 PNG…"); b_expng.setObjectName("layerExportButton"); b_expng.setProperty("primary", True)
         b_expng.setToolTip("把所有可见图层合成导出为 PNG（隐藏层不导出）"); b_expng.clicked.connect(self.export_png)
-        b_extiff = QtWidgets.QPushButton("导出 TIFF…"); b_extiff.setToolTip("投稿期刊常要求 TIFF（自动写 300DPI 元数据）"); b_extiff.clicked.connect(self.export_tiff)
-        exp_row.addWidget(b_expng); exp_row.addWidget(b_extiff); ll.addLayout(exp_row)
-        ll.addWidget(self._hint("点选高亮、👁 显隐、双击重命名、拖拽行调层级；右键菜单：上/下移、勾选打组、删除、蒙版。底栏图标：新建/删除/打组/解组/亮度对比度/蒙版。隐藏的层不导出。"))
+        b_extiff = QtWidgets.QPushButton("导出 TIFF…"); b_extiff.setObjectName("layerExportButton")
+        b_extiff.setToolTip("投稿期刊常要求 TIFF（自动写 300DPI 元数据）"); b_extiff.clicked.connect(self.export_tiff)
+        exp_row.addWidget(b_expng); exp_row.addWidget(b_extiff); _lcd.addLayout(exp_row)
+        _lcd.addWidget(self._hint("拖拽调层级 · 右键更多操作 · 隐藏层不导出"))
+        ll.addWidget(self.layer_control_deck)
 
         # —— 素材库（BioRender 式：顶部 Tab 切「本地库/抠出素材」，只显一个，搜索置顶，次要操作收进 ⚙）——
         w_assets, al = make_panel()
@@ -2041,31 +2382,41 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         # ===== 页0：本地素材库 =====
         _page_local = QtWidgets.QWidget()
         _pl = QtWidgets.QVBoxLayout(_page_local); _pl.setContentsMargins(0, 0, 0, 0); _pl.setSpacing(6)
-        _srow = QtWidgets.QHBoxLayout()  # 搜索 + ⚙ 菜单（连接/索引/按分类导出/拆分合集 全收进来）
+        _srow = QtWidgets.QHBoxLayout()  # 搜索 + 操作菜单（连接/索引/按分类导出/拆分合集 全收进来）
         self.asset_search = QtWidgets.QLineEdit()
-        self.asset_search.setPlaceholderText("🔍 搜索素材名（跨全部分类）…")
+        self.asset_search.setObjectName("assetSearch")
+        self.asset_search.addAction(icons.tool_icon("zoom", theme.colors()["muted"], 16), QtWidgets.QLineEdit.ActionPosition.LeadingPosition)
+        self.asset_search.setPlaceholderText("搜索素材名（跨全部分类）…")
         self.asset_search.setClearButtonEnabled(True)
         self._asset_filter = ""; self._asset_cur_items = []; self._asset_all_items = []
         self._search_timer = QtCore.QTimer(self); self._search_timer.setSingleShot(True); self._search_timer.setInterval(200)
         self._search_timer.timeout.connect(self._apply_asset_search)
         self.asset_search.textChanged.connect(lambda *_: self._search_timer.start())
         _srow.addWidget(self.asset_search, 1)
-        self.asset_fs_count = QtWidgets.QLabel(""); self.asset_fs_count.setObjectName("hint")
-        _srow.addWidget(self.asset_fs_count)
-        _gear = QtWidgets.QToolButton(); _gear.setText("⚙")
+        _gear = QtWidgets.QToolButton()
+        _gear.setObjectName("assetGear")
+        _gear.setIcon(icons.tool_icon("settings", theme.colors()["text"], 18))
+        _gear.setIconSize(QtCore.QSize(18, 18))
+        _gear.setFixedSize(34, 32)
         _gear.setToolTip("素材库操作：连接文件夹 / 生成分类索引 / 按分类导出 / 拆分合集")
         _gear.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
-        _gear.setAutoRaise(True); _gear.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        _gear.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         _gmenu = QtWidgets.QMenu(_gear)
-        _gmenu.addAction("📁 连接素材文件夹…", self._connect_asset_dir)
-        _gmenu.addAction("🗂 生成分类索引", self._build_asset_manifest)
-        _gmenu.addAction("⬇ 按分类导出…", self._export_assets_by_category)
+        _tc = theme.colors()
+        _gmenu.addAction(icons.tool_icon("folder", _tc["text"], 16), "连接素材文件夹…", self._connect_asset_dir)
+        _gmenu.addAction(icons.tool_icon("new_layer", _tc["text"], 16), "生成分类索引", self._build_asset_manifest)
+        _gmenu.addAction(icons.tool_icon("download", _tc["text"], 16), "按分类导出…", self._export_assets_by_category)
         _gmenu.addSeparator()
-        _gmenu.addAction("✂ 拆分合集为单个图标…", self._split_montage_assets)
-        _gmenu.addAction("✂ 批量裁透明边（当前分类）…", self._trim_asset_folder)
+        _gmenu.addAction(icons.tool_icon("scissors", _tc["text"], 16), "拆分合集为单个图标…", self._split_montage_assets)
+        _gmenu.addAction(icons.tool_icon("crop", _tc["text"], 16), "批量裁透明边（当前分类）…", self._trim_asset_folder)
         _gear.setMenu(_gmenu)
         _srow.addWidget(_gear)
         _pl.addLayout(_srow)
+        self.asset_guide = self._make_guide(
+            "asset_library", "star",
+            "连接素材文件夹后，左侧分类树只显示当前分类的直属素材；搜索会跨全部分类查找。",
+            "连接", self._connect_asset_dir)
+        _pl.addWidget(self.asset_guide)
         # 分类树（分类→子分类；物理批次目录已在 asset_lib 折叠，UI 只露出语义分类）
         self.asset_tree = QtWidgets.QTreeWidget()
         self.asset_tree.setObjectName("assetTree")
@@ -2078,9 +2429,18 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_tree.setToolTip("素材分类树。点语义分类直接看素材；物理分批目录已隐藏，缩略图按可见区域懒加载。")
         self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
         _pl.addWidget(self.asset_tree)
+        self.asset_header = QtWidgets.QFrame()
+        self.asset_header.setObjectName("assetHeader")
+        _ah = QtWidgets.QHBoxLayout(self.asset_header)
+        _ah.setContentsMargins(8, 5, 8, 5); _ah.setSpacing(8)
         self.asset_path_label = QtWidgets.QLabel("选择分类")
         self.asset_path_label.setObjectName("assetPath")
-        _pl.addWidget(self.asset_path_label)
+        self.asset_path_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.asset_fs_count = QtWidgets.QLabel("")
+        self.asset_fs_count.setObjectName("countBadge")
+        _ah.addWidget(self.asset_path_label, 1)
+        _ah.addWidget(self.asset_fs_count, 0, QtCore.Qt.AlignmentFlag.AlignRight)
+        _pl.addWidget(self.asset_header)
         self._asset_thumb = 84
         self.asset_fs_list = AssetListWidget()
         self.asset_fs_list.setObjectName("assetGrid")  # 卡片边界
@@ -2098,11 +2458,65 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_fs_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)  # 右键：放画布/收藏/拆分/定位
         self.asset_fs_list.customContextMenuRequested.connect(self._fs_asset_menu)
         self.asset_fs_list.setSpacing(4); self.asset_fs_list.setMinimumHeight(140)
+        self.asset_fs_list.setMouseTracking(True)
+        self.asset_fs_list.viewport().setMouseTracking(True)
+        self.asset_fs_list.itemEntered.connect(self._asset_hovered)
+        self.asset_fs_list.itemSelectionChanged.connect(self._asset_selection_changed)
         self._thumb_timer = QtCore.QTimer(self); self._thumb_timer.setSingleShot(True); self._thumb_timer.setInterval(60)
         self._thumb_timer.timeout.connect(self._lazy_decode_asset_thumbs)  # 滚动去抖 → 只解码可见缩略图
         self.asset_fs_list.verticalScrollBar().valueChanged.connect(lambda *_: self._thumb_timer.start())
         _pl.addWidget(self.asset_fs_list, 1)
-        _pl.addWidget(self._hint("首次使用：点右上 ⚙ →「连接素材文件夹」。缩略图单击放画布中央、拖动放到指定位置；右键有更多。"))
+        self.asset_preview_card = QtWidgets.QFrame()
+        self.asset_preview_card.setObjectName("assetPreview")
+        _pv = QtWidgets.QVBoxLayout(self.asset_preview_card)
+        _pv.setContentsMargins(8, 8, 8, 8); _pv.setSpacing(6)
+        self.asset_preview_thumb = QtWidgets.QLabel()
+        self.asset_preview_thumb.setObjectName("assetPreviewThumb")
+        self.asset_preview_thumb.setMinimumHeight(118)
+        self.asset_preview_thumb.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.asset_preview_thumb.setPixmap(self._asset_placeholder_icon(False).pixmap(QtCore.QSize(112, 112)))
+        _pv.addWidget(self.asset_preview_thumb)
+        _pv_bottom = QtWidgets.QHBoxLayout(); _pv_bottom.setContentsMargins(0, 0, 0, 0); _pv_bottom.setSpacing(8)
+        _pv_text = QtWidgets.QVBoxLayout(); _pv_text.setContentsMargins(0, 0, 0, 0); _pv_text.setSpacing(2)
+        self.asset_preview_name = QtWidgets.QLabel("悬停预览")
+        self.asset_preview_name.setObjectName("assetPreviewName")
+        self.asset_preview_name.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.asset_preview_name.setWordWrap(True)
+        self.asset_preview_meta = QtWidgets.QLabel("文件名、分类和尺寸会显示在这里")
+        self.asset_preview_meta.setObjectName("assetPreviewMeta")
+        self.asset_preview_meta.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.asset_preview_meta.setWordWrap(True)
+        self.asset_preview_path = QtWidgets.QLabel("")
+        self.asset_preview_path.setObjectName("assetPreviewPath")
+        self.asset_preview_path.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.asset_preview_path.setWordWrap(True)
+        _pv_text.addWidget(self.asset_preview_name)
+        _pv_text.addWidget(self.asset_preview_meta)
+        _pv_text.addWidget(self.asset_preview_path)
+        _pv_text.addStretch(1)
+        _pv_bottom.addLayout(_pv_text, 1)
+        _pv_actions = QtWidgets.QVBoxLayout(); _pv_actions.setContentsMargins(0, 0, 0, 0); _pv_actions.setSpacing(5)
+        self.asset_preview_place = QtWidgets.QToolButton()
+        self.asset_preview_place.setObjectName("assetPreviewAction")
+        self.asset_preview_place.setIcon(icons.tool_icon("move", theme.colors()["text"], 18))
+        self.asset_preview_place.setToolTip("放到画布中央")
+        self.asset_preview_place.clicked.connect(self._place_preview_asset)
+        self.asset_preview_fav = QtWidgets.QToolButton()
+        self.asset_preview_fav.setObjectName("assetPreviewAction")
+        self.asset_preview_fav.setIcon(icons.tool_icon("star", theme.colors()["muted"], 18))
+        self.asset_preview_fav.setIconSize(QtCore.QSize(18, 18))
+        self.asset_preview_fav.setToolTip("收藏")
+        self.asset_preview_fav.clicked.connect(self._toggle_preview_favorite)
+        for _pv_btn in (self.asset_preview_place, self.asset_preview_fav):
+            _pv_btn.setFixedSize(30, 30)
+            _pv_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            _pv_btn.setEnabled(False)
+            _pv_actions.addWidget(_pv_btn)
+        _pv_actions.addStretch(1)
+        _pv_bottom.addLayout(_pv_actions)
+        _pv.addLayout(_pv_bottom)
+        _pl.addWidget(self.asset_preview_card)
+        _pl.addWidget(self._hint("单击放画布中央 · 拖动精确放置 · 右键更多操作"))
         self._asset_groups = []
         self.asset_stack.addWidget(_page_local)
 
@@ -2132,7 +2546,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         b_clra = QtWidgets.QPushButton("清空"); b_clra.setProperty("danger", True)
         b_clra.setToolTip("清空整个素材库（会弹确认）"); b_clra.clicked.connect(self.clear_assets)
         _erow.addWidget(b_expa); _erow.addWidget(b_clra); _pe.addLayout(_erow)
-        _pe.addWidget(self._hint("抠图/去背景/自动拆解的元素在此。单击放回画布；右键导出/删除单个。"))
+        _pe.addWidget(self._hint("单击放回画布 · 右键导出或删除"))
         self.asset_stack.addWidget(_page_extract)
 
         # —— 历史记录（PS 历史面板）——
@@ -2148,7 +2562,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.hist_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)  # 高亮自绘，不用系统选中态
         self.hist_list.itemClicked.connect(
             lambda it: self.jump_to(it.data(QtCore.Qt.ItemDataRole.UserRole)))
-        hl.addWidget(self.hist_list, 1)
+        self.hist_stack = QtWidgets.QStackedWidget()
+        self.hist_empty = EmptyState("undo", "暂无历史记录", "编辑、导入、调层级后会在这里出现可回退步骤。")
+        self.hist_stack.addWidget(self.hist_empty)
+        self.hist_stack.addWidget(self.hist_list)
+        hl.addWidget(self.hist_stack, 1)
         hl.addWidget(self._hint("点某步跳到该状态；当前步高亮，其后步骤变灰仍可恢复；做新操作会截断灰色分支。"))
 
         # —— 矢量属性（B2：元素级选中的 fill/stroke / 文字字体字号色 + 配色助手）——
@@ -2203,9 +2621,19 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
     def _build_statusbar(self):
         self.info_label = QtWidgets.QLabel("未加载图片")
+        self.info_label.setObjectName("statusDoc")
+        self.info_label.setMinimumWidth(180)
         self.op_label = QtWidgets.QLabel("")
+        self.op_label.setObjectName("statusOp")
+        self.op_label.setMinimumWidth(220)
+        self.op_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.fps_label = QtWidgets.QLabel("FPS -")
+        self.fps_label.setObjectName("statusMeta")
         self.fps_label.setVisible(False)  # FPS 浮标默认关（开发脚手架），调试菜单可开
+        self.coord_label = QtWidgets.QLabel("X -  Y -")
+        self.coord_label.setObjectName("statusMeta")
+        self.coord_label.setMinimumWidth(92)
+        self.coord_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.statusBar().addWidget(self.info_label)
         self.statusBar().addWidget(self.op_label, 1)
 
@@ -2213,6 +2641,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         # zoom_label 必须在 __init__ 里 zoomChanged.connect(_update_zoom_label) 之前建好——_build_statusbar 先于该 connect 调用，时序成立。
         def _mk_zoom_btn(text, tip, slot, w=34):
             b = QtWidgets.QToolButton()
+            b.setObjectName("statusZoomBtn")
             b.setText(text); b.setToolTip(tip)
             b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             b.setFixedSize(w, 22)  # 固定尺寸 → 状态栏一排按钮高低胖瘦一致
@@ -2220,9 +2649,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             return b
 
         self.zoom_label = QtWidgets.QLabel("100%")
+        self.zoom_label.setObjectName("statusZoom")
         self.zoom_label.setMinimumWidth(52)
         self.zoom_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.zoom_label.setStyleSheet("font-family:'Consolas','Menlo',monospace; font-weight:600;")  # 等宽→百分比变化不抖
+        self.zoom_label.setProperty("mono", True)  # 等宽→百分比变化不抖
+        self.statusBar().addPermanentWidget(self.coord_label)
         self.statusBar().addPermanentWidget(_mk_zoom_btn("−", "缩小", self.view.zoom_out, 28))
         self.statusBar().addPermanentWidget(self.zoom_label)
         self.statusBar().addPermanentWidget(_mk_zoom_btn("+", "放大", self.view.zoom_in, 28))
@@ -2230,32 +2661,60 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.statusBar().addPermanentWidget(_mk_zoom_btn("1:1", "实际大小 100%", self.view.zoom_actual, 40))
         self.statusBar().addPermanentWidget(self.fps_label)
 
-    # ---------- 可复用忙碌进度弹窗（indeterminate；仿 ai_panel 的 setRange(0,0) busy 无限滚动）----------
-    def _begin_busy(self, label: str, cancelable: bool = True) -> "QtWidgets.QProgressDialog":
-        # 不确定进度（联网单发请求，无逐张进度）→ QProgressDialog(0,0) 自动 busy 无限滚动条。
+    def _toast(self, text: str, timeout_ms: int = 2200):
+        """频繁成功/提示反馈走非模态 toast，同时同步到底部状态栏。"""
+        self.op_label.setText(text)
+        if not hasattr(self, "_toast_label"):
+            self._toast_label = QtWidgets.QLabel(self)
+            self._toast_label.setObjectName("toast")
+            self._toast_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._toast_label.setWordWrap(True)
+            self._toast_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self._toast_label.setMaximumWidth(520)
+            self._toast_timer = QtCore.QTimer(self)
+            self._toast_timer.setSingleShot(True)
+            self._toast_timer.timeout.connect(self._toast_label.hide)
+        self._toast_label.setText(text)
+        self._toast_label.adjustSize()
+        w = min(max(self._toast_label.width() + 18, 220), 520)
+        h = self._toast_label.height() + 10
+        self._toast_label.resize(w, h)
+        x = max(12, (self.width() - w) // 2)
+        y = max(12, self.height() - self.statusBar().height() - h - 18)
+        self._toast_label.move(x, y)
+        self._toast_label.raise_()
+        self._toast_label.show()
+        self._toast_timer.start(timeout_ms)
+
+    # ---------- 可复用忙碌进度面板（indeterminate；项目内统一样式）----------
+    def _begin_busy(self, label: str, cancelable: bool = True) -> ProgressSheet:
+        # 不确定进度（联网单发请求，无逐张进度）→ ProgressSheet(0,0) busy 无限滚动条。
         # 模态盖住编辑区但事件循环继续转（busy 动画活、worker done 跨线程信号仍回主线程）。
-        dlg = QtWidgets.QProgressDialog(label, "取消" if cancelable else None, 0, 0, self)
-        dlg.setWindowTitle("请稍候")
-        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-        dlg.setMinimumDuration(0)               # 立即弹出（默认 4000ms 会"看起来没反应"）
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)                 # 进度不确定，手动关，避免 Qt 误判 100% 自动关
-        dlg.setValue(0)                         # 配合 minimumDuration(0) 强制立刻 show
+        dlg = ProgressSheet("请稍候", label, 0, self, cancelable)
+        dlg.counter_label.setText("处理中")
         dlg.show()
         QtWidgets.QApplication.processEvents()  # 保证这一帧就画出来
         return dlg
 
     def _end_busy(self, dlg):
         if dlg is not None:
-            # 关键：QProgressDialog.reset() 在未达 100% 时会发 canceled 信号 → 误触 _on_seg_cancel，
-            # 把正常完成误判成"已取消"并自增 epoch 丢弃结果。先断开 canceled，程序化关闭不再走取消路径。
             try:
                 dlg.canceled.disconnect()
             except (RuntimeError, TypeError):
-                pass  # 没接过 canceled（如 GrabCut 这类不带取消语义的忙碌弹窗）
-            dlg.reset()
+                pass
             dlg.close()
             dlg.deleteLater()
+
+    def _begin_progress(self, title: str, detail: str, total: int, cancelable: bool = True) -> ProgressSheet:
+        sheet = ProgressSheet(title, detail, total, self, cancelable)
+        sheet.show()
+        QtWidgets.QApplication.processEvents()
+        return sheet
+
+    def _end_progress(self, sheet):
+        if sheet is not None:
+            sheet.close()
+            sheet.deleteLater()
 
     def _pick_color(self):
         c = QtWidgets.QColorDialog.getColor(self.brush_color, self, "画笔颜色")
@@ -2300,6 +2759,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if hasattr(self, "_opts_stack"):  # 上下文选项栏切到该工具对应页（QStackedWidget 负责显隐，无需再手动 setVisible）
             page = self._tool_opt_page.get(tool, "blank")
             self._opts_stack.setCurrentIndex(self._opt_pages.get(page, self._blank_idx))
+            if hasattr(self, "_option_tool_label"):
+                self._option_tool_label.setText(self._tool_option_titles.get(tool, tool))
         if hasattr(self, "_resize_handle") and self.active:  # 缩放手柄仅移动工具显示
             self._update_outline()
         if hasattr(self, "size_slider"):  # 进画笔/绘制/橡皮 → 刷新尺寸光圈
@@ -2589,6 +3050,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if 0 <= self._hist_index < self.hist_list.count():
             self.hist_list.scrollToItem(self.hist_list.item(self._hist_index))
         self.hist_list.blockSignals(False)
+        if hasattr(self, "hist_stack"):
+            self.hist_stack.setCurrentWidget(self.hist_list if self._history else self.hist_empty)
 
     # _on_layer_row / _on_layer_pressed / _on_layer_selection_changed / _reselect_rows_by_uid 已抽到 editor_layers.LayersMixin。
 
@@ -2627,6 +3090,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._ruler_left.sync()
 
     def _on_cursor_scene(self, sp: QtCore.QPointF):  # 鼠标移动 → 标尺游标线跟随（只刷窄带，不重建刻度）
+        if hasattr(self, "coord_label"):
+            self.coord_label.setText("X %d  Y %d" % (int(sp.x()), int(sp.y())))
         if not getattr(self, "_rulers_visible", False):
             return
         self._ruler_top.set_cursor(sp.x())
@@ -2842,8 +3307,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         保存返回 True；取消返回 False。key 保存后清空输入框，绝不在 UI 长驻明文。"""
         conn = config.get_seg_conn()
         dlg = QtWidgets.QDialog(self)
+        dlg.setObjectName("toolDialog")
         dlg.setWindowTitle("AI 抠图/拆解 · 后端设置")
         form = QtWidgets.QFormLayout(dlg)
+        form.setContentsMargins(18, 16, 18, 16)
+        form.setSpacing(10)
         provider = QtWidgets.QComboBox()
         for val, label in seg_client.SEG_PROVIDERS:
             provider.addItem(label, val)
@@ -2871,12 +3339,17 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         key_input = QtWidgets.QLineEdit()
         key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         key_input.setText(config.read_seg_key() or "")  # 回填已存 Key（密码打码，点眼睛才显），看得出已存
-        key_input.setPlaceholderText("API Key（仅存本机 ~/.sciedit，不外传；点 👁 可查看）")
-        key_eye = QtWidgets.QToolButton(); key_eye.setText("👁"); key_eye.setCheckable(True)
+        key_input.setPlaceholderText("API Key（仅存本机 ~/.sciedit，不外传；点右侧按钮可查看）")
+        key_eye = QtWidgets.QToolButton(); key_eye.setCheckable(True)
+        key_eye.setObjectName("assetPreviewAction")
+        key_eye.setIcon(icons.eye_icon(False, theme.colors()["text"], 18))
+        key_eye.setIconSize(QtCore.QSize(18, 18))
         key_eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         key_eye.setToolTip("显示 / 隐藏 Key（仅本机查看，不外传）")
-        key_eye.toggled.connect(lambda on: key_input.setEchoMode(
-            QtWidgets.QLineEdit.EchoMode.Normal if on else QtWidgets.QLineEdit.EchoMode.Password))
+        def _toggle_key_eye(on):
+            key_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal if on else QtWidgets.QLineEdit.EchoMode.Password)
+            key_eye.setIcon(icons.eye_icon(on, theme.colors()["text"], 18))
+        key_eye.toggled.connect(_toggle_key_eye)
         key_field = QtWidgets.QWidget()  # Key 输入 + 眼睛同一行；用容器整行随后端显隐
         _krow = QtWidgets.QHBoxLayout(key_field); _krow.setContentsMargins(0, 0, 0, 0); _krow.setSpacing(4)
         _krow.addWidget(key_input, 1); _krow.addWidget(key_eye)
@@ -2940,8 +3413,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
                 form.setRowVisible(w, bool(v))
             form.setRowVisible(node, p == "grsai")
             hints = {
-                "local": "✅ 推荐·开箱即用：本地内置模型，离线去背景，无需地址/Key——直接点 Save。",
-                "grsai": "✅ 推荐：复用「生图」里配好的 grsai Key。可在下方选『节点』(国内/国外) 和『模型』，留默认也行——直接 Save。难抠彩色图质量更好。",
+                "local": "推荐：本地内置模型，离线去背景，无需地址/Key，直接点 Save。",
+                "grsai": "推荐：复用「生图」里配好的 grsai Key。可在下方选『节点』(国内/国外) 和『模型』，留默认也行，直接 Save。难抠彩色图质量更好。",
                 "ppio":  "PPIO Qwen-Image-Edit：填你的 PPIO Key；『模型』默认 qwen/qwen-image-edit；端点留空=默认。异步去背景/编辑。",
                 "http":  "自定义中转：填 OpenAI image-edit 兼容的「地址」+「Key」。",
                 "rembg": "建议改用上面的「本地内置模型」——同样本地，但无需自己 pip install。",
@@ -3178,8 +3651,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
     def _ask_canvas_size(self, title, with_bg, init_w, init_h):
         dlg = QtWidgets.QDialog(self)
+        dlg.setObjectName("toolDialog")
         dlg.setWindowTitle(title)
         form = QtWidgets.QFormLayout(dlg)
+        form.setContentsMargins(18, 16, 18, 16)
+        form.setSpacing(10)
         combo = QtWidgets.QComboBox()
         for name, _ in self.CANVAS_DLG_PRESETS:
             combo.addItem(name)
@@ -3484,10 +3960,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if tool in ("rectsel", "rect", "erase", "crop"):  # 拖框类（矩形选框选区 / 矩形抠出 / 矩形挖洞 / 裁剪）
             self._rect_start(scene_pos); return
         if not self.active:            # draw / eraser → 在图层上画像素
-            QtWidgets.QMessageBox.information(self, "提示", "请先「新建透明图层」或在右侧选中一个图层再画")
+            self._toast("请先新建透明图层，或在右侧选中一个图层再画")
             return
         if self.active.get("kind") == "vector":  # 矢量层无像素画布 → 不能用像素画笔（fail-loud，不静默崩 KeyError）
-            QtWidgets.QMessageBox.information(self, "提示", "矢量层不能用像素画笔/橡皮。请选中一个栅格图层，或用「移动」工具拖动矢量图元。")
+            self._toast("矢量层不能用像素画笔/橡皮；请选中栅格层或用移动工具")
             return
         if self._active_locked():
             return
@@ -3566,10 +4042,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
     # ----- 套索 / 矩形 -----
     def _need_active_for_sel(self) -> bool:
         if not self.active:
-            QtWidgets.QMessageBox.information(self, "提示", "选区作用在图层上：请先选中或新建一个图层")
+            self._toast("选区作用在图层上：请先选中或新建一个图层")
             return False
         if self.active.get("kind") == "vector":  # 矢量层无像素 → 选区/魔棒不适用（fail-loud，不静默崩）
-            QtWidgets.QMessageBox.information(self, "提示", "矢量层没有像素，无法用魔棒/套索/选区工具。请选中一个栅格图层。")
+            self._toast("矢量层没有像素，魔棒/套索/选区工具需要栅格图层")
             return False
         return True
 
@@ -3614,13 +4090,16 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
                         self._measure_p1.y() - self._measure_p0.y())
         if l1 < 1e-6:
             self.op_label.setText("测量线太短，无法设比例"); return
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            self, "设测量比例", f"当前测量线 = {l1:.1f} px，代表多少真实单位？",
-            value=1.0, minValue=1e-9, maxValue=1e9, decimals=6)
+        if hasattr(self, "_ask_measure_scale"):
+            val, unit, ok = self._ask_measure_scale(l1)
+        else:
+            val, ok = QtWidgets.QInputDialog.getDouble(
+                self, "设测量比例", f"当前测量线 = {l1:.1f} px，代表多少真实单位？",
+                value=1.0, minValue=1e-9, maxValue=1e9, decimals=6)
+            if not ok:
+                return
+            unit, ok = QtWidgets.QInputDialog.getText(self, "设测量比例", "单位名（如 mm / µm / nm）：", text="µm")
         if not ok:
-            return
-        unit, ok2 = QtWidgets.QInputDialog.getText(self, "设测量比例", "单位名（如 mm / µm / nm）：", text="µm")
-        if not ok2:
             return
         unit = unit.strip() or "u"
         self._measure_scale = (val / l1, unit)  # units per pixel
@@ -3640,7 +4119,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if self._measure_p0 is None or self._measure_p1 is None:
             self.op_label.setText("请先拖一条测量线，再拉直"); return
         if not self.active:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选中要拉直的图层"); return
+            self._toast("请先选中要拉直的图层"); return
         if self._active_locked():
             return
         ang = self._measure_angle  # 度，水平=0、逆时针正
@@ -3734,7 +4213,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         # PS「图像>调整>亮度/对比度」：实时预览，OK 提交一步可撤销，Cancel/关窗还原原图。
         layer = self.active
         if layer is None or layer.get("image") is None:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选中或新建一个图层，再调整亮度/对比度")
+            self._toast("请先选中或新建一个图层，再调整亮度/对比度")
             return
         if self._active_locked():
             return
@@ -3742,8 +4221,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         orig_rgba = image_ops.qimage_to_rgba(orig_qimg)     # 一次转换；滑动时复用，不再 qimage_to_rgba
 
         dlg = QtWidgets.QDialog(self)
+        dlg.setObjectName("toolDialog")
         dlg.setWindowTitle("亮度/对比度")
         form = QtWidgets.QFormLayout(dlg)
+        form.setContentsMargins(18, 16, 18, 16)
+        form.setSpacing(10)
 
         def row(lo, hi):
             s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -4044,7 +4526,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
     # ---------- 压力测试 ----------
     def stress_test(self):
         if not self.layers:
-            QtWidgets.QMessageBox.information(self, "压力测试", "请先导入一张图片作底图")
+            self._toast("请先导入一张图片作底图")
             return
         n, ok = QtWidgets.QInputDialog.getInt(self, "压力测试", "叠加图层数 N：", 20, 1, 300)
         if not ok:

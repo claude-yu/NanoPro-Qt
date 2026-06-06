@@ -19,7 +19,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import asset_lib
 import config
+import icons
 import image_ops
+import theme
 
 
 class _AssetScanSignals(QtCore.QObject):
@@ -49,20 +51,112 @@ class _AssetScanTask(QtCore.QRunnable):
 
 class AssetsMixin:
     # ---------- 素材库 ----------
+    def _notify(self, text: str):
+        if hasattr(self, "_toast"):
+            self._toast(text)
+        else:
+            self.op_label.setText(text)
+
+    def _asset_rel_category(self, path: str) -> str:
+        root = config.get_asset_dir()
+        rel_dir = os.path.dirname(path)
+        if root:
+            try:
+                rel_dir = os.path.relpath(os.path.dirname(path), root)
+            except ValueError:
+                pass
+        if rel_dir in (".", ""):
+            return "未分类"
+        return rel_dir.replace("\\", " / ").replace("/", " / ")
+
+    @staticmethod
+    def _asset_short_name(name: str, limit: int = 18) -> str:
+        stem, _ext = os.path.splitext(name)
+        stem = stem or name
+        if len(stem) <= limit:
+            return stem
+        keep = max(6, (limit - 1) // 2)
+        return stem[:keep] + "…" + stem[-keep:]
+
+    def _sync_preview_actions(self, enabled: bool, path: str = ""):
+        self._asset_preview_path = path if enabled else ""
+        for name in ("asset_preview_place", "asset_preview_fav"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(enabled)
+        if enabled and hasattr(self, "asset_preview_fav"):
+            is_fav = path in set(config.get_asset_favorites())
+            color = theme.colors()["accent"] if is_fav else theme.colors()["muted"]
+            self.asset_preview_fav.setText("")
+            self.asset_preview_fav.setIcon(icons.tool_icon("star", color, 18))
+            self.asset_preview_fav.setToolTip("取消收藏" if is_fav else "收藏")
+
+    def _set_asset_preview_empty(self, title: str, meta: str):
+        if all(hasattr(self, name) for name in ("asset_preview_thumb", "asset_preview_name", "asset_preview_meta")):
+            self.asset_preview_thumb.setPixmap(self._asset_placeholder_icon(False).pixmap(QtCore.QSize(112, 112)))
+            self.asset_preview_name.setText(title)
+            self.asset_preview_meta.setText(meta)
+            self.asset_preview_name.setToolTip("")
+            self.asset_preview_meta.setToolTip("")
+            if hasattr(self, "asset_preview_path"):
+                self.asset_preview_path.setText("")
+                self.asset_preview_path.setToolTip("")
+        self._sync_preview_actions(False)
+
+    def _asset_placeholder_icon(self, failed: bool = False) -> QtGui.QIcon:
+        """轻量占位缩略图：素材懒解码前也不让网格出现空白卡片。"""
+        size = 84
+        if hasattr(self, "asset_fs_list"):
+            size = max(48, self.asset_fs_list.iconSize().width())
+        dpr = max(1.0, self.devicePixelRatioF())
+        import theme
+        c = theme.colors()
+        key = ("failed" if failed else "idle", size, round(dpr, 2), c["thumb"], c["border"], c["muted"])
+        cache = getattr(self, "_asset_placeholder_cache", {})
+        if key in cache:
+            return cache[key]
+
+        pm = QtGui.QPixmap(int(round(size * dpr)), int(round(size * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        r = QtCore.QRectF(0.5, 0.5, size - 1, size - 1)
+        p.setPen(QtGui.QPen(QtGui.QColor(c["border"]), 1))
+        p.setBrush(QtGui.QColor(c["thumb"]))
+        p.drawRoundedRect(r, 8, 8)
+        pen = QtGui.QPen(QtGui.QColor(c["danger"] if failed else c["muted"]), 1.4)
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        cx, cy = size / 2.0, size / 2.0
+        if failed:
+            p.drawLine(QtCore.QPointF(cx - 10, cy - 10), QtCore.QPointF(cx + 10, cy + 10))
+            p.drawLine(QtCore.QPointF(cx + 10, cy - 10), QtCore.QPointF(cx - 10, cy + 10))
+        else:
+            p.drawRoundedRect(QtCore.QRectF(cx - 15, cy - 13, 30, 26), 4, 4)
+            p.drawLine(QtCore.QPointF(cx - 9, cy + 2), QtCore.QPointF(cx - 2, cy - 5))
+            p.drawLine(QtCore.QPointF(cx - 2, cy - 5), QtCore.QPointF(cx + 10, cy + 7))
+            p.drawEllipse(QtCore.QPointF(cx + 7, cy - 7), 2.2, 2.2)
+        p.end()
+
+        icon = QtGui.QIcon(pm)
+        cache[key] = icon
+        self._asset_placeholder_cache = cache
+        return icon
+
     def add_to_assets(self):
         if self.selection_mask is not None and self.active:   # 有选区 → 加裁切的选区
             res = self._crop_selection()
             if res is None:
-                QtWidgets.QMessageBox.information(self, "提示", "选区为空")
+                self._notify("选区为空")
                 return
             self.assets.append(self._trim_transparent_qimage(res[0]))  # 裁透明边 → 素材=真正的图
         elif self.active:                                     # 无选区 → 把整个选中图层加入（裁掉透明留白）
             self.assets.append(self._trim_transparent_qimage(self.active["image"].copy()))
         else:
-            QtWidgets.QMessageBox.information(self, "提示", "请先选中一个图层，或用套索/矩形/魔棒取选区")
+            self._notify("请先选中一个图层，或用套索/矩形/魔棒取选区")
             return
         self._refresh_assets()
-        self.op_label.setText(f"已加入素材库（共 {len(self.assets)} 个）")
+        self._notify(f"已加入素材库（共 {len(self.assets)} 个）")
 
     def _refresh_assets(self):
         self.asset_list.clear()
@@ -103,7 +197,7 @@ class AssetsMixin:
                              max(0.0, min((ch - sh) / 2 + off, ch - sh)))
         self._suspend_history = False
         self.set_tool("move")
-        self.op_label.setText("素材已放回画布")
+        self._notify("素材已放回画布")
 
     def _asset_menu(self, pos):  # 素材右键菜单：导出此素材 / 删除此素材（对齐 WebView exportItem/remove）
         it = self.asset_list.itemAt(pos)
@@ -113,10 +207,15 @@ class AssetsMixin:
         if i is None or not (0 <= i < len(self.assets)):
             return
         menu = QtWidgets.QMenu(self)
-        menu.addAction("放回画布", lambda: self._asset_clicked(it))
-        menu.addAction("导出此素材…", lambda: self._export_one_asset(i))
+        tc = theme.colors()
+        section = QtGui.QAction("放置", menu); section.setEnabled(False); menu.addAction(section)
+        menu.addAction(icons.tool_icon("move", tc["text"], 16), "放回画布", lambda: self._asset_clicked(it))
         menu.addSeparator()
-        menu.addAction("✕ 删除此素材", lambda: self._delete_asset(i))
+        section = QtGui.QAction("文件", menu); section.setEnabled(False); menu.addAction(section)
+        menu.addAction(icons.tool_icon("new_layer", tc["text"], 16), "导出此素材…", lambda: self._export_one_asset(i))
+        menu.addSeparator()
+        section = QtGui.QAction("危险操作", menu); section.setEnabled(False); menu.addAction(section)
+        menu.addAction(icons.tool_icon("trash", tc["danger"], 16), "删除此素材", lambda: self._delete_asset(i))
         menu.exec(self.asset_list.mapToGlobal(pos))
 
     def _delete_selected_asset(self):  # Del 键：删除当前选中的素材
@@ -131,7 +230,7 @@ class AssetsMixin:
         if 0 <= i < len(self.assets):
             self.assets.pop(i)
             self._refresh_assets()
-            self.op_label.setText(f"已删除该素材（剩 {len(self.assets)} 个）")
+            self._notify(f"已删除该素材（剩 {len(self.assets)} 个）")
 
     def _export_one_asset(self, i: int):
         if not (0 <= i < len(self.assets)):
@@ -139,11 +238,11 @@ class AssetsMixin:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出素材", f"asset_{i + 1}.png", "PNG (*.png)")
         if path:
             self.assets[i].save(path, "PNG")
-            self.op_label.setText(f"已导出素材到 {path}")
+            self._notify(f"已导出素材到 {path}")
 
     def export_assets(self):
         if not self.assets:
-            QtWidgets.QMessageBox.information(self, "导出", "素材库为空")
+            self._notify("素材库为空")
             return
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择导出文件夹")
         if not folder:
@@ -152,7 +251,7 @@ class AssetsMixin:
         for i, im in enumerate(self.assets):
             if im.save(f"{folder}/asset_{i + 1}.png", "PNG"):
                 n += 1
-        self.op_label.setText(f"已导出 {n}/{len(self.assets)} 个透明 PNG 到 {folder}")
+        self._notify(f"已导出 {n}/{len(self.assets)} 个透明 PNG 到 {folder}")
 
     def clear_assets(self):
         if not self.assets:
@@ -164,7 +263,7 @@ class AssetsMixin:
             return
         self.assets = []
         self._refresh_assets()
-        self.op_label.setText("素材库已清空")
+        self._notify("素材库已清空")
 
     # ---------- 本地素材库（连接文件夹 / 分类 / 拖到画布建层）----------
     def _connect_asset_dir(self):
@@ -187,8 +286,14 @@ class AssetsMixin:
         # 代际计数：扫描进行中又换目录 → 旧结果回来时 gen 不匹配，丢弃（防竞态覆盖）
         self._asset_scan_gen = getattr(self, "_asset_scan_gen", 0) + 1
         if not root:
+            if hasattr(self, "asset_path_label"):
+                self.asset_path_label.setText("未连接素材文件夹")
+            if hasattr(self, "asset_fs_count"):
+                self.asset_fs_count.setText("")
+            self._set_asset_preview_empty("未连接素材库", "点击右上角齿轮连接素材文件夹")
             return
-        busy = QtWidgets.QTreeWidgetItem(["⏳ 正在加载素材库…"])
+        busy = QtWidgets.QTreeWidgetItem(["正在加载素材库…"])
+        busy.setIcon(0, icons.tool_icon("clock", theme.colors()["muted"], 16))
         busy.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)  # 占位，不可点
         self.asset_tree.addTopLevelItem(busy)
         self.op_label.setText("素材库加载中…（大库首次扫描需几秒，不影响其它操作）")
@@ -204,10 +309,12 @@ class AssetsMixin:
             return  # 已被更新的一次加载取代，丢弃旧结果
         self.asset_tree.clear()
         if err:
-            self.op_label.setText("素材库：%s" % err)
+            self._notify("素材库：%s" % err)
+            self._set_asset_preview_empty("素材库加载失败", str(err))
             return
         if node is None:
-            self.op_label.setText("素材库：该文件夹下没有图片素材")
+            self._notify("素材库：该文件夹下没有图片素材")
+            self._set_asset_preview_empty("没有图片素材", "请检查连接的文件夹或图片格式")
             return
         self._asset_all_items = all_items
         self._populate_asset_tree(node)
@@ -218,13 +325,15 @@ class AssetsMixin:
             self._asset_cur_items = top.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
             self._set_asset_path_label(top)
         self._refresh_asset_thumbs()
-        self.op_label.setText("素材库：%d 张，已按文件夹分类（点分类树浏览/搜索）" % len(all_items))
+        if all_items:
+            self._complete_guide("asset_library", "asset_guide")
+        self._notify("素材库：%d 张，已按文件夹分类（点分类树浏览/搜索）" % len(all_items))
 
     _ASSET_MARK = QtCore.Qt.ItemDataRole.UserRole + 1  # 树节点角色：标记「收藏/最近」虚拟分类
 
     def _populate_asset_tree(self, node):
         """扫描树 → QTreeWidget。item 文本=「名（直属N）」，data 存该节点【直属】items。
-        顶部加「⭐收藏 / 🕘最近使用」虚拟分类（点击时实时从 config 取，永远最新）。"""
+        顶部加「收藏 / 最近使用」虚拟分类（点击时实时从 config 取，永远最新）。"""
         def add(parent, nd):
             label = "%s（%d）" % (nd["name"], len(nd["items"])) if nd["items"] else nd["name"]
             it = QtWidgets.QTreeWidgetItem([label])
@@ -233,8 +342,10 @@ class AssetsMixin:
             for ch in nd["children"]:
                 add(it, ch)
             return it
-        fav = QtWidgets.QTreeWidgetItem(["⭐ 收藏"]); fav.setData(0, self._ASSET_MARK, "fav")
-        rec = QtWidgets.QTreeWidgetItem(["🕘 最近使用"]); rec.setData(0, self._ASSET_MARK, "recent")
+        fav = QtWidgets.QTreeWidgetItem(["收藏"]); fav.setData(0, self._ASSET_MARK, "fav")
+        fav.setIcon(0, icons.tool_icon("star", theme.colors()["accent"], 16))
+        rec = QtWidgets.QTreeWidgetItem(["最近使用"]); rec.setData(0, self._ASSET_MARK, "recent")
+        rec.setIcon(0, icons.tool_icon("clock", theme.colors()["muted"], 16))
         self.asset_tree.addTopLevelItem(fav); self.asset_tree.addTopLevelItem(rec)
         add(None, node).setExpanded(True)  # 根展开，露出一级分类
 
@@ -311,39 +422,48 @@ class AssetsMixin:
         import os
         items = list(self._asset_cur_items or []) or list(self._asset_all_items or [])
         if not items:
-            QtWidgets.QMessageBox.information(self, "拆分合集", "当前分类没有素材。先连接素材文件夹并在分类树里点一个分类。")
+            self._notify("当前分类没有素材，先连接素材文件夹并选择分类")
             return
         out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择拆分结果的输出文件夹（会写入若干单个图标 PNG）")
         if not out:
             return
-        prog = QtWidgets.QProgressDialog("正在拆分合集…", "取消", 0, len(items), self)
-        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal); prog.setMinimumDuration(0)
+        prog = self._begin_progress("拆分合集", "正在分析当前分类素材", len(items))
         sheets = pieces = failed = skipped = 0
-        for k, it in enumerate(items):
-            if prog.wasCanceled():
-                break
-            prog.setValue(k); QtWidgets.QApplication.processEvents()
-            path = it.get("path")
-            qi = QtGui.QImage(path) if path else QtGui.QImage()
-            if qi.isNull():
-                failed += 1; continue
-            qi = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
-            try:
-                boxes = image_ops.split_montage(image_ops.qimage_to_rgba(qi))
-            except Exception:
-                failed += 1; continue
-            if len(boxes) <= 1:                       # 切不出多块=本就是单图 → 跳过(计数，不静默)
-                skipped += 1; continue
-            sheets += 1
-            stem = os.path.splitext(os.path.basename(path))[0]
-            for idx, (x, y, w, h) in enumerate(boxes):
-                crop = qi.copy(int(x), int(y), int(w), int(h))
-                dst = os.path.join(out, "%s_%02d.png" % (stem, idx + 1))
-                if crop.save(dst, "PNG"):
-                    pieces += 1
-                else:
+        try:
+            for k, it in enumerate(items):
+                if prog.wasCanceled():
+                    break
+                path = it.get("path")
+                name = os.path.basename(path) if path else "未知文件"
+                prog.step(k, name, failed)
+                qi = QtGui.QImage(path) if path else QtGui.QImage()
+                if qi.isNull():
                     failed += 1
-        prog.setValue(len(items))
+                    prog.step(k + 1, name, failed)
+                    continue
+                qi = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+                try:
+                    boxes = image_ops.split_montage(image_ops.qimage_to_rgba(qi))
+                except Exception:
+                    failed += 1
+                    prog.step(k + 1, name, failed)
+                    continue
+                if len(boxes) <= 1:                       # 切不出多块=本就是单图 → 跳过(计数，不静默)
+                    skipped += 1
+                    prog.step(k + 1, name, failed)
+                    continue
+                sheets += 1
+                stem = os.path.splitext(os.path.basename(path))[0]
+                for idx, (x, y, w, h) in enumerate(boxes):
+                    crop = qi.copy(int(x), int(y), int(w), int(h))
+                    dst = os.path.join(out, "%s_%02d.png" % (stem, idx + 1))
+                    if crop.save(dst, "PNG"):
+                        pieces += 1
+                    else:
+                        failed += 1
+                prog.step(k + 1, name, failed)
+        finally:
+            self._end_progress(prog)
         msg = ("拆分完成：\n  合集大图 %d 张 → 切出单个图标 %d 个\n"
                "  跳过(本就是单图，无需拆) %d 张\n  失败 %d\n  输出目录：%s"
                % (sheets, pieces, skipped, failed, out))
@@ -353,7 +473,7 @@ class AssetsMixin:
                 ) == QtWidgets.QMessageBox.StandardButton.Yes:
             config.set_asset_dir(out); self._load_asset_dir()
         else:
-            QtWidgets.QMessageBox.information(self, "拆分合集", msg)
+            self._notify(msg.split("\n", 1)[0])
 
     def _trim_asset_folder(self):
         """把【当前分类】的素材批量裁掉四周透明留白 → 输出到新文件夹（非破坏，不动原图）。
@@ -361,7 +481,7 @@ class AssetsMixin:
         import os, shutil
         items = list(self._asset_cur_items or []) or list(self._asset_all_items or [])
         if not items:
-            QtWidgets.QMessageBox.information(self, "批量裁透明边", "当前分类没有素材。先在分类树里点一个分类（别点整库根，太大）。")
+            self._notify("当前分类没有素材，先在分类树里点一个分类")
             return
         if len(items) > 3000 and QtWidgets.QMessageBox.question(
                 self, "批量裁透明边",
@@ -372,36 +492,42 @@ class AssetsMixin:
         out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择裁剪结果的输出文件夹（非破坏，不改原图）")
         if not out:
             return
-        prog = QtWidgets.QProgressDialog("正在批量裁透明边…", "取消", 0, len(items), self)
-        prog.setWindowModality(QtCore.Qt.WindowModality.WindowModal); prog.setMinimumDuration(0)
+        prog = self._begin_progress("批量裁透明边", "正在处理当前分类素材", len(items))
         trimmed = same = failed = 0
-        for k, it in enumerate(items):
-            if prog.wasCanceled():
-                break
-            prog.setValue(k); QtWidgets.QApplication.processEvents()
-            path = it.get("path")
-            qi = QtGui.QImage(path) if path else QtGui.QImage()
-            if qi.isNull():
-                failed += 1; continue
-            stem = os.path.splitext(os.path.basename(path))[0]
-            qa = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
-            try:
-                bb = image_ops.content_bbox(image_ops.qimage_to_rgba(qa))
-            except Exception:
-                bb = None
-            if bb is None or (bb[0] == 0 and bb[1] == 0 and bb[2] == qi.width() and bb[3] == qi.height()):
-                try:  # 无透明边/无 alpha → 原样复制（保格式不膨胀），让输出文件夹是【完整】一套库
-                    shutil.copy2(path, os.path.join(out, os.path.basename(path)))
-                    same += 1
-                except Exception:
+        try:
+            for k, it in enumerate(items):
+                if prog.wasCanceled():
+                    break
+                path = it.get("path")
+                name = os.path.basename(path) if path else "未知文件"
+                prog.step(k, name, failed)
+                qi = QtGui.QImage(path) if path else QtGui.QImage()
+                if qi.isNull():
                     failed += 1
-                continue
-            x0, y0, x1, y1 = bb
-            if qa.copy(x0, y0, x1 - x0, y1 - y0).save(os.path.join(out, stem + ".png"), "PNG"):
-                trimmed += 1
-            else:
-                failed += 1
-        prog.setValue(len(items))
+                    prog.step(k + 1, name, failed)
+                    continue
+                stem = os.path.splitext(os.path.basename(path))[0]
+                qa = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+                try:
+                    bb = image_ops.content_bbox(image_ops.qimage_to_rgba(qa))
+                except Exception:
+                    bb = None
+                if bb is None or (bb[0] == 0 and bb[1] == 0 and bb[2] == qi.width() and bb[3] == qi.height()):
+                    try:  # 无透明边/无 alpha → 原样复制（保格式不膨胀），让输出文件夹是【完整】一套库
+                        shutil.copy2(path, os.path.join(out, os.path.basename(path)))
+                        same += 1
+                    except Exception:
+                        failed += 1
+                    prog.step(k + 1, name, failed)
+                    continue
+                x0, y0, x1, y1 = bb
+                if qa.copy(x0, y0, x1 - x0, y1 - y0).save(os.path.join(out, stem + ".png"), "PNG"):
+                    trimmed += 1
+                else:
+                    failed += 1
+                prog.step(k + 1, name, failed)
+        finally:
+            self._end_progress(prog)
         msg = ("批量裁透明边完成：\n  裁紧 %d 张（透明边已去）\n  无需裁/无透明边 %d 张（原样复制）\n  失败 %d\n  输出：%s"
                % (trimmed, same, failed, out))
         if (trimmed + same) and QtWidgets.QMessageBox.question(
@@ -410,13 +536,13 @@ class AssetsMixin:
                 ) == QtWidgets.QMessageBox.StandardButton.Yes:
             config.set_asset_dir(out); self._load_asset_dir()
         else:
-            QtWidgets.QMessageBox.information(self, "批量裁透明边", msg)
+            self._notify(msg.split("\n", 1)[0])
 
     def _build_asset_manifest(self):
         """给当前素材根目录一键生成 manifest.json（按子文件夹分类，递归收深层图），再重扫刷新。"""
         root = config.get_asset_dir()
         if not root:
-            QtWidgets.QMessageBox.information(self, "生成分类索引", "请先点上面「连接素材文件夹」选一个目录")
+            self._notify("请先连接素材文件夹")
             return
         import style_lib
         self.op_label.setText("生成分类索引中…")
@@ -436,8 +562,9 @@ class AssetsMixin:
         msg = "已生成分类索引：%d 个分类 / %d 张图" % (nt, nf)
         if nt <= 1:  # 顶层平铺 → 只有一个「未分类」，明确告知怎么才能分类
             msg += "\n\n注意：只有 1 个分类——图都在顶层、没分到子文件夹。\n要分多类，请把图按主题放进不同子文件夹后再点一次。"
-        self.op_label.setText(msg.split("\n")[0])
-        QtWidgets.QMessageBox.information(self, "生成分类索引", msg)  # 明确弹窗反馈，不只底部小字
+        self._notify(msg.split("\n")[0])
+        if nt <= 1:
+            self._notify("只有 1 个分类：请把素材放进子文件夹后再生成索引")
 
     def _export_assets_by_category(self):
         """把本地素材库按【分类】导出到选定目录：每个分类一个子文件夹、复制其中每张图。
@@ -445,7 +572,7 @@ class AssetsMixin:
         root = config.get_asset_dir()
         groups, err = asset_lib.scan_assets(root) if root else ([], "未连接素材文件夹")
         if err or not groups:
-            QtWidgets.QMessageBox.information(self, "按分类导出", err or "请先「连接素材文件夹」并确保里面有素材")
+            self._notify(err or "请先连接素材文件夹并确保里面有素材")
             return
         out = QtWidgets.QFileDialog.getExistingDirectory(self, "选择导出目标文件夹（将按分类建子文件夹）")
         if not out:
@@ -475,8 +602,9 @@ class AssetsMixin:
         msg = "按分类导出完成：%d 个分类 / %d 张图 → %s" % (len(groups), n_ok, out)
         if n_fail:
             msg += "；%d 张失败" % n_fail  # 大声失败：不把失败藏起来
-        self.op_label.setText(msg)
-        QtWidgets.QMessageBox.information(self, "按分类导出", msg)
+        self._notify(msg)
+        if n_fail:
+            self._notify("按分类导出完成，但有 %d 张失败" % n_fail)
 
     def _refresh_asset_thumbs(self):
         """渲染：有搜索→全树过滤；否则→当前选中分类的【直属】图。只挂项不解码 + 懒解可见 → 不卡。"""
@@ -490,17 +618,25 @@ class AssetsMixin:
         else:
             items = list(self._asset_cur_items or [])
         total = len(items)
+        if total == 0:
+            self._set_asset_preview_empty("没有可预览素材", "请选择子分类或换个搜索词")
+        desired_grid = QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + (38 if flt else 16))
+        if lst.gridSize() != desired_grid:
+            lst.setGridSize(desired_grid)
         CAP = 800  # 单视图最多这么多（再多 QListWidget 本身就卡）→ 点子分类或搜索缩小
         capped = total > CAP
         if capped:
             items = items[:CAP]
         favs = set(config.get_asset_favorites())  # 收藏的置顶标星
+        placeholder = self._asset_placeholder_icon(False)
         for it in items:
             lw = QtWidgets.QListWidgetItem()  # 不解码 icon，只挂路径(拖拽/单击用)+提示
-            star = "⭐ " if it["path"] in favs else ""
-            # 悬停大图预览：HTML tooltip 内嵌原图(宽240) + 文件名 → 鼠标停上去就看清是什么
-            lw.setToolTip("%s<img src='file:///%s' width='240'><br>%s"
-                          % (star, it["path"].replace("\\", "/"), it["file"]))
+            lw.setIcon(placeholder)
+            fav_tag = "已收藏 · " if it["path"] in favs else ""
+            cat = self._asset_rel_category(it["path"])
+            if flt:
+                lw.setText(self._asset_short_name(it["file"]))
+            lw.setToolTip("%s%s\n分类：%s\n%s" % (fav_tag, it["file"], cat, it["path"]))
             lw.setData(QtCore.Qt.ItemDataRole.UserRole, it["path"])
             lst.addItem(lw)
         lst.setUpdatesEnabled(True)
@@ -524,6 +660,66 @@ class AssetsMixin:
             else:
                 self.asset_path_label.setText("选择分类")
         self._refresh_asset_thumbs()
+
+    def _asset_hovered(self, item):
+        path = item.data(QtCore.Qt.ItemDataRole.UserRole) if item is not None else None
+        if path:
+            self._update_asset_preview(path)
+
+    def _asset_selection_changed(self):
+        item = self.asset_fs_list.currentItem() if hasattr(self, "asset_fs_list") else None
+        if item is not None:
+            self._asset_hovered(item)
+
+    def _update_asset_preview(self, path: str):
+        if not all(hasattr(self, name) for name in ("asset_preview_thumb", "asset_preview_name", "asset_preview_meta")):
+            return
+        import os as _os
+        reader = QtGui.QImageReader(path)
+        reader.setAutoTransform(True)
+        sz = reader.size()
+        folder = _os.path.basename(_os.path.dirname(path)) or "素材"
+        rel_dir = self._asset_rel_category(path)
+        meta = folder
+        if sz.isValid():
+            meta = "%s · %d×%d" % (meta, sz.width(), sz.height())
+            target = QtCore.QSize(220, 150)
+            scaled = QtCore.QSize(sz)
+            scaled.scale(target, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+            reader.setScaledSize(scaled)
+        img = reader.read()
+        if img.isNull():
+            icon = self._asset_placeholder_icon(True)
+            pm = icon.pixmap(QtCore.QSize(112, 112))
+            meta = meta + " · 预览失败"
+        else:
+            pm = QtGui.QPixmap.fromImage(img).scaled(
+                220, 150, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation)
+        self.asset_preview_thumb.setPixmap(pm)
+        self.asset_preview_name.setText(_os.path.basename(path))
+        self.asset_preview_meta.setText(meta)
+        self.asset_preview_name.setToolTip(path)
+        self.asset_preview_meta.setToolTip(path)
+        if hasattr(self, "asset_preview_path"):
+            self.asset_preview_path.setText(rel_dir)
+            self.asset_preview_path.setToolTip(path)
+        self._sync_preview_actions(True, path)
+
+    def _place_preview_asset(self):
+        path = getattr(self, "_asset_preview_path", "")
+        if not path:
+            return
+        cs = self.canvas_size
+        center = QtCore.QPointF(cs[0] / 2, cs[1] / 2) if cs else QtCore.QPointF(0, 0)
+        self._place_asset(center, path)
+
+    def _toggle_preview_favorite(self):
+        path = getattr(self, "_asset_preview_path", "")
+        if not path:
+            return
+        self._toggle_fs_favorite(path)
+        self._sync_preview_actions(True, path)
 
     def _lazy_decode_asset_thumbs(self):
         """只解码当前可见(+上下各 30 预读)项的缩略图；已解码的跳过（item 持 icon + 解码标记）。"""
@@ -567,6 +763,9 @@ class AssetsMixin:
                                    QtCore.Qt.TransformationMode.SmoothTransformation)
                 pm.setDevicePixelRatio(dpr)  # 标记物理/逻辑比 → Qt 按逻辑 base 显示且清晰
                 lw.setIcon(QtGui.QIcon(pm))
+            else:
+                lw.setIcon(self._asset_placeholder_icon(True))
+                lw.setToolTip("缩略图读取失败<br>%s" % lw.data(QtCore.Qt.ItemDataRole.UserRole))
             lw.setData(DR, True); lw.setData(DSZ, base)
 
     def _on_asset_thumb_size(self, val):
@@ -629,7 +828,7 @@ class AssetsMixin:
         self._refresh_connectors()
         if hasattr(self, "_update_outline"):
             self._update_outline()
-        self.op_label.setText("已裁透明边：%d×%d → %d×%d" % (img.width(), img.height(), x1 - x0, y1 - y0))
+        self._notify("已裁透明边：%d×%d → %d×%d" % (img.width(), img.height(), x1 - x0, y1 - y0))
 
     def _place_asset(self, scene_pos: QtCore.QPointF, path: str):
         """素材拖到画布 drop 处：裁掉四周透明留白后建图层，使图居中落在 scene_pos（clamp 不越界）。"""
@@ -681,18 +880,25 @@ class AssetsMixin:
             return
         is_fav = path in set(config.get_asset_favorites())
         menu = QtWidgets.QMenu(self)
-        menu.addAction("放到画布中央", lambda: self._fs_asset_clicked(it))
-        menu.addAction("取消收藏 ⭐" if is_fav else "收藏 ⭐", lambda: self._toggle_fs_favorite(path))
+        tc = theme.colors()
+        section = QtGui.QAction("放置", menu); section.setEnabled(False); menu.addAction(section)
+        menu.addAction(icons.tool_icon("move", tc["text"], 16), "放到画布中央", lambda: self._fs_asset_clicked(it))
+        menu.addAction(icons.tool_icon("star", tc["accent"], 16), "取消收藏" if is_fav else "收藏", lambda: self._toggle_fs_favorite(path))
         menu.addSeparator()
-        menu.addAction("✂ 拆分此合集为单个图标…", lambda: self._split_one_montage(path))
+        section = QtGui.QAction("整理", menu); section.setEnabled(False); menu.addAction(section)
+        menu.addAction(icons.tool_icon("crop", tc["text"], 16), "拆分此合集为单个图标…", lambda: self._split_one_montage(path))
+        menu.addSeparator()
+        section = QtGui.QAction("文件", menu); section.setEnabled(False); menu.addAction(section)
         menu.addAction("在资源管理器中显示", lambda: self._reveal_in_explorer(path))
         menu.addAction("复制文件路径", lambda: QtWidgets.QApplication.clipboard().setText(str(path)))
         menu.exec(self.asset_fs_list.mapToGlobal(pos))
 
     def _toggle_fs_favorite(self, path):
         now = config.toggle_asset_favorite(path)
-        self.op_label.setText(("已收藏 ⭐ " if now else "已取消收藏 ") + os.path.basename(path))
+        self._notify(("已收藏 " if now else "已取消收藏 ") + os.path.basename(path))
         self._refresh_asset_thumbs()  # 刷新星标显示
+        if getattr(self, "_asset_preview_path", "") == path:
+            self._sync_preview_actions(True, path)
 
     def _reveal_in_explorer(self, path):
         import subprocess
@@ -708,12 +914,12 @@ class AssetsMixin:
         """拆分单张合集图 → 存到同目录的 <stem>_拆分/ 子文件夹，完成后重扫露出新子分类。"""
         qi = QtGui.QImage(path)
         if qi.isNull():
-            QtWidgets.QMessageBox.information(self, "拆分合集", "无法读取该图")
+            self._notify("无法读取该图")
             return
         qi = qi.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
         boxes = image_ops.split_montage(image_ops.qimage_to_rgba(qi))
         if len(boxes) <= 1:
-            QtWidgets.QMessageBox.information(self, "拆分合集", "这张图切不出多个图标（可能本就是单个图标，无需拆分）")
+            self._notify("这张图切不出多个图标，可能本就是单个图标")
             return
         stem = os.path.splitext(os.path.basename(path))[0]
         out = os.path.join(os.path.dirname(path), stem + "_拆分")
@@ -726,6 +932,5 @@ class AssetsMixin:
         for idx, (x, y, w, h) in enumerate(boxes):
             if qi.copy(int(x), int(y), int(w), int(h)).save(os.path.join(out, "%s_%02d.png" % (stem, idx + 1)), "PNG"):
                 n += 1
-        QtWidgets.QMessageBox.information(
-            self, "拆分合集", "已把这张合集拆成 %d 个单个图标 →\n%s\n\n（分类树里会出现「%s_拆分」子分类）" % (n, out, stem))
+        self._notify("已拆成 %d 个单个图标：%s_拆分" % (n, stem))
         self._load_asset_dir()  # 重扫，露出新子文件夹

@@ -72,11 +72,11 @@ class ExportMixin:
 
     def export_png(self):
         if self._only_vector_visible():  # E：纯矢量层合成是全透明 → PNG 会空白却报成功，先拦下引导走 SVG
-            QtWidgets.QMessageBox.information(self, "导出 PNG", "当前只有可见的矢量图层，PNG 会是空白。\n请改用「导出 SVG…」。")
+            self._toast("当前只有可见的矢量图层，请改用导出 SVG")
             return
         out = self._render_composite()
         if out is None:
-            QtWidgets.QMessageBox.information(self, "导出", "画布为空")
+            self._toast("画布为空")
             return
         name = f"{getattr(self, 'source_name', None) or 'figure'}_edited.png"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出 PNG", self._save_start("export", name), "PNG (*.png)")
@@ -96,11 +96,11 @@ class ExportMixin:
     def export_tiff(self):
         # H13: 导出 TIFF（投稿期刊常要求）。Qt 原生支持 QImage.save(..,'TIFF')，无需手写 IFD。
         if self._only_vector_visible():  # E：纯矢量层 TIFF 同样会空白，先拦下
-            QtWidgets.QMessageBox.information(self, "导出 TIFF", "当前只有可见的矢量图层，TIFF 会是空白。\n请改用「导出 SVG…」。")
+            self._toast("当前只有可见的矢量图层，请改用导出 SVG")
             return
         out = self._render_composite()
         if out is None:
-            QtWidgets.QMessageBox.information(self, "导出", "画布为空")
+            self._toast("画布为空")
             return
         name = f"{getattr(self, 'source_name', None) or 'figure'}_edited.tiff"
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出 TIFF", self._save_start("export", name), "TIFF (*.tiff *.tif)")
@@ -131,7 +131,7 @@ class ExportMixin:
 
     def save_project(self):
         if not self.layers:
-            QtWidgets.QMessageBox.information(self, "保存工程", "画布为空，没有可保存的内容")
+            self._toast("画布为空，没有可保存的内容")
             return
         import json
         default = f"{self.source_name or 'project'}.nanopro.json"

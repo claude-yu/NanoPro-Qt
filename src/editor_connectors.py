@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import icons
+import theme
+
 
 class ConnectorsMixin:
     # ----- 智能连接线：从对象拖到对象建带箭头连线，移动/缩放自动跟随（BioRender 式）-----
@@ -255,16 +258,19 @@ class ConnectorsMixin:
         if hit is None:
             return False
         m = QtWidgets.QMenu(self)
-        sm = m.addMenu("连线形状")
+        tc = theme.colors()
+        sm = m.addMenu(icons.tool_icon("connector", tc["text"], 16), "连线形状")
         for label, s in (("直线", "straight"), ("曲线（推荐）", "curved"), ("折线", "elbow")):
-            a = sm.addAction(("● " if hit.line_shape == s else "○ ") + label)
+            a = sm.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(hit.line_shape == s)
             a.triggered.connect(lambda _=False, ss=s, cc=hit: (cc.set_shape(ss),
                                 self.op_label.setText("连线形状已改")))
-        m.addAction("改连线颜色…", lambda cc=hit: self._connector_pick_color(cc))
+        m.addAction(icons.tool_icon("palette", tc["text"], 16), "改连线颜色…", lambda cc=hit: self._connector_pick_color(cc))
         da = m.addAction("虚线"); da.setCheckable(True); da.setChecked(hit.dashed)
         da.toggled.connect(lambda v, cc=hit: cc.set_dashed(v))
         m.addSeparator()
-        m.addAction("✕ 删除连接线", lambda cc=hit: self._remove_connector(cc))
+        m.addAction(icons.tool_icon("trash", tc["danger"], 16), "删除连接线", lambda cc=hit: self._remove_connector(cc))
         m.exec(global_pos)
         return True
 
