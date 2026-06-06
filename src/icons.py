@@ -144,6 +144,32 @@ def tool_icon(name: str, color: str = "#cdd2db", size: int = 22) -> QtGui.QIcon:
             rad = R if i % 2 == 0 else r
             poly.append(QtCore.QPointF(cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
         pt.drawPolygon(poly)
+    elif name == "z_mark":
+        pen = pt.pen()
+        pen.setWidthF(max(2.6, s * 0.16))
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.SquareCap)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.MiterJoin)
+        pt.setPen(pen)
+        _line(pt, s * 0.24, s * 0.25, s * 0.78, s * 0.25)
+        _line(pt, s * 0.78, s * 0.25, s * 0.25, s * 0.76)
+        _line(pt, s * 0.25, s * 0.76, s * 0.78, s * 0.76)
+    elif name == "ai_spark":
+        pen = pt.pen()
+        pen.setWidthF(max(1.8, s * 0.09))
+        pt.setPen(pen)
+        # Main four-point sparkle: generation / magic / AI action.
+        cx, cy = s * 0.48, s * 0.43
+        _line(pt, cx, s * 0.12, cx, s * 0.74)
+        _line(pt, s * 0.20, cy, s * 0.76, cy)
+        _line(pt, s * 0.30, s * 0.24, s * 0.66, s * 0.62)
+        _line(pt, s * 0.66, s * 0.24, s * 0.30, s * 0.62)
+        pt.setBrush(QtGui.QColor(color))
+        pt.drawEllipse(QtCore.QPointF(cx, cy), s * 0.07, s * 0.07)
+        # Two small companion sparkles so it reads as AI/generative rather than a plus sign.
+        for sx, sy, r in ((s * 0.78, s * 0.22, s * 0.08), (s * 0.25, s * 0.78, s * 0.07)):
+            pt.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            _line(pt, sx - r, sy, sx + r, sy)
+            _line(pt, sx, sy - r, sx, sy + r)
     elif name == "undo":  # 逆时针回转箭头
         pt.drawArc(QtCore.QRectF(s * 0.24, s * 0.26, s * 0.52, s * 0.52), 35 * 16, 250 * 16)
         pt.setBrush(QtGui.QColor(color))
@@ -249,6 +275,67 @@ def tool_icon(name: str, color: str = "#cdd2db", size: int = 22) -> QtGui.QIcon:
         path.lineTo(s * 0.18, s * 0.78)
         path.closeSubpath()
         pt.drawPath(path)
+    elif name == "import_image":
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.16, s * 0.22, s * 0.68, s * 0.56), 3, 3)
+        pt.drawEllipse(QtCore.QPointF(s * 0.34, s * 0.38), s * 0.055, s * 0.055)
+        mountain = QtGui.QPolygonF([
+            QtCore.QPointF(s * 0.22, s * 0.72),
+            QtCore.QPointF(s * 0.42, s * 0.52),
+            QtCore.QPointF(s * 0.54, s * 0.64),
+            QtCore.QPointF(s * 0.66, s * 0.48),
+            QtCore.QPointF(s * 0.80, s * 0.72),
+        ])
+        pt.drawPolyline(mountain)
+        _line(pt, s * 0.76, s * 0.12, s * 0.76, s * 0.32)
+        _line(pt, s * 0.76, s * 0.12, s * 0.68, s * 0.20)
+        _line(pt, s * 0.76, s * 0.12, s * 0.84, s * 0.20)
+    elif name in ("file_svg", "file_pdf"):
+        pt.drawRoundedRect(QtCore.QRectF(s * 0.24, s * 0.14, s * 0.52, s * 0.72), 2.5, 2.5)
+        _line(pt, s * 0.60, s * 0.14, s * 0.76, s * 0.30)
+        _line(pt, s * 0.60, s * 0.14, s * 0.60, s * 0.30)
+        _line(pt, s * 0.60, s * 0.30, s * 0.76, s * 0.30)
+        f = pt.font(); f.setPixelSize(max(6, int(s * 0.22))); f.setBold(True)
+        pt.setFont(f)
+        pt.drawText(QtCore.QRectF(s * 0.24, s * 0.46, s * 0.52, s * 0.26),
+                    QtCore.Qt.AlignmentFlag.AlignCenter, "SVG" if name == "file_svg" else "PDF")
+    elif name == "canvas_size":
+        pt.drawRect(QtCore.QRectF(s * 0.18, s * 0.22, s * 0.64, s * 0.52))
+        _line(pt, s * 0.18, s * 0.84, s * 0.82, s * 0.84)
+        _line(pt, s * 0.18, s * 0.78, s * 0.18, s * 0.88)
+        _line(pt, s * 0.82, s * 0.78, s * 0.82, s * 0.88)
+        _line(pt, s * 0.86, s * 0.22, s * 0.86, s * 0.74)
+        _line(pt, s * 0.80, s * 0.22, s * 0.90, s * 0.22)
+        _line(pt, s * 0.80, s * 0.74, s * 0.90, s * 0.74)
+    elif name == "grid":
+        for x in (0.26, 0.50, 0.74):
+            _line(pt, s * x, s * 0.18, s * x, s * 0.82)
+        for y in (0.26, 0.50, 0.74):
+            _line(pt, s * 0.18, s * y, s * 0.82, s * y)
+    elif name == "snap":
+        _line(pt, s * 0.22, s * 0.24, s * 0.22, s * 0.78)
+        _line(pt, s * 0.52, s * 0.24, s * 0.52, s * 0.78)
+        pt.drawArc(QtCore.QRectF(s * 0.22, s * 0.32, s * 0.44, s * 0.36), 80 * 16, -220 * 16)
+        _line(pt, s * 0.66, s * 0.50, s * 0.78, s * 0.40)
+        _line(pt, s * 0.66, s * 0.50, s * 0.78, s * 0.60)
+    elif name in ("flip_h", "flip_v"):
+        if name == "flip_h":
+            _line(pt, c, s * 0.16, c, s * 0.84)
+            left = QtGui.QPolygonF([QtCore.QPointF(s * 0.18, s * 0.50), QtCore.QPointF(s * 0.44, s * 0.26), QtCore.QPointF(s * 0.44, s * 0.74)])
+            right = QtGui.QPolygonF([QtCore.QPointF(s * 0.82, s * 0.50), QtCore.QPointF(s * 0.56, s * 0.26), QtCore.QPointF(s * 0.56, s * 0.74)])
+        else:
+            _line(pt, s * 0.16, c, s * 0.84, c)
+            left = QtGui.QPolygonF([QtCore.QPointF(s * 0.50, s * 0.18), QtCore.QPointF(s * 0.26, s * 0.44), QtCore.QPointF(s * 0.74, s * 0.44)])
+            right = QtGui.QPolygonF([QtCore.QPointF(s * 0.50, s * 0.82), QtCore.QPointF(s * 0.26, s * 0.56), QtCore.QPointF(s * 0.74, s * 0.56)])
+        pt.drawPolygon(left); pt.drawPolygon(right)
+    elif name in ("rotate_cw", "rotate_ccw"):
+        start = -35 if name == "rotate_cw" else 215
+        span = 265 if name == "rotate_cw" else -265
+        pt.drawArc(QtCore.QRectF(s * 0.22, s * 0.22, s * 0.56, s * 0.56), start * 16, span * 16)
+        pt.setBrush(QtGui.QColor(color))
+        if name == "rotate_cw":
+            pt.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(s * 0.78, s * 0.31), QtCore.QPointF(s * 0.62, s * 0.29), QtCore.QPointF(s * 0.72, s * 0.44)]))
+        else:
+            pt.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(s * 0.22, s * 0.31), QtCore.QPointF(s * 0.38, s * 0.29), QtCore.QPointF(s * 0.28, s * 0.44)]))
     elif name == "download":
         _line(pt, c, s * 0.18, c, s * 0.62)
         _line(pt, c, s * 0.62, c - s * 0.16, s * 0.46)

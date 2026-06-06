@@ -57,6 +57,14 @@ class AssetsMixin:
         else:
             self.op_label.setText(text)
 
+    def _sync_asset_local_state(self, available: bool):
+        """Switch local asset browser between actionable empty state and real browser content."""
+        if not hasattr(self, "asset_local_stack"):
+            return
+        target = self.asset_local_content if available else self.asset_local_empty
+        if self.asset_local_stack.currentWidget() is not target:
+            self.asset_local_stack.setCurrentWidget(target)
+
     def _asset_rel_category(self, path: str) -> str:
         root = config.get_asset_dir()
         rel_dir = os.path.dirname(path)
@@ -78,9 +86,60 @@ class AssetsMixin:
         keep = max(6, (limit - 1) // 2)
         return stem[:keep] + "…" + stem[-keep:]
 
+    def _asset_visual_meta(self, path: str) -> tuple[int, int, int, str]:
+        """Cheap image metadata used for BioRender-like browsing order.
+
+        Bucket order is intentionally visual, not file-system order:
+        small icon -> medium reusable illustration -> large montage/background.
+        QImageReader.size() reads headers without decoding full images, and the
+        result is cached per path so scrolling/searching does not keep probing.
+        """
+        cache = getattr(self, "_asset_visual_meta_cache", {})
+        hit = cache.get(path)
+        if hit is not None:
+            return hit
+        w = h = 0
+        try:
+            reader = QtGui.QImageReader(path)
+            reader.setAutoTransform(True)
+            sz = reader.size()
+            if sz.isValid():
+                w, h = int(sz.width()), int(sz.height())
+        except Exception:
+            pass
+        area = max(0, w * h)
+        long_edge = max(w, h)
+        aspect = (long_edge / max(1, min(w, h))) if w and h else 1.0
+        if not area:
+            bucket, label = 1, "中等素材"
+        elif long_edge <= 320 and area <= 90_000:
+            bucket, label = 0, "小图标"
+        elif long_edge >= 1200 or area >= 900_000 or aspect >= 5.0:
+            bucket, label = 2, "大图/合集"
+        else:
+            bucket, label = 1, "中等素材"
+        meta = (bucket, area, long_edge, label)
+        cache[path] = meta
+        self._asset_visual_meta_cache = cache
+        return meta
+
+    def _sort_asset_items_for_browse(self, items: list[dict]) -> tuple[list[dict], dict[int, int]]:
+        counts = {0: 0, 1: 0, 2: 0}
+
+        def key(it):
+            path = it.get("path", "")
+            bucket, area, long_edge, _label = self._asset_visual_meta(path)
+            counts[bucket] = counts.get(bucket, 0) + 1
+            return (bucket, area, long_edge, os.path.basename(path).lower())
+
+        return sorted(items, key=key), counts
+
+    def _asset_bucket_title(self, bucket: int) -> str:
+        return {0: "小图标", 1: "中等素材", 2: "大图 / 合集"}.get(int(bucket), "素材")
+
     def _sync_preview_actions(self, enabled: bool, path: str = ""):
         self._asset_preview_path = path if enabled else ""
-        for name in ("asset_preview_place", "asset_preview_fav"):
+        for name in ("asset_preview_place", "asset_preview_fav", "asset_preview_reveal", "asset_preview_copy"):
             if hasattr(self, name):
                 getattr(self, name).setEnabled(enabled)
         if enabled and hasattr(self, "asset_preview_fav"):
@@ -92,7 +151,7 @@ class AssetsMixin:
 
     def _set_asset_preview_empty(self, title: str, meta: str):
         if all(hasattr(self, name) for name in ("asset_preview_thumb", "asset_preview_name", "asset_preview_meta")):
-            self.asset_preview_thumb.setPixmap(self._asset_placeholder_icon(False).pixmap(QtCore.QSize(112, 112)))
+            self.asset_preview_thumb.setPixmap(self._asset_placeholder_icon(False).pixmap(QtCore.QSize(144, 144)))
             self.asset_preview_name.setText(title)
             self.asset_preview_meta.setText(meta)
             self.asset_preview_name.setToolTip("")
@@ -171,6 +230,9 @@ class AssetsMixin:
         self.asset_count.setText(str(n))
         if hasattr(self, "asset_tabbar"):  # 计数显示在「抠出素材 N」Tab 文案上（BioRender 式）
             self.asset_tabbar.setTabText(1, "抠出素材 %d" % n)
+        if hasattr(self, "extract_asset_stack"):
+            self.extract_asset_stack.setCurrentWidget(
+                self.asset_list if n else self.extract_asset_empty)
 
     def _asset_clicked(self, item):
         mods = QtWidgets.QApplication.keyboardModifiers()
@@ -291,7 +353,9 @@ class AssetsMixin:
             if hasattr(self, "asset_fs_count"):
                 self.asset_fs_count.setText("")
             self._set_asset_preview_empty("未连接素材库", "点击右上角齿轮连接素材文件夹")
+            self._sync_asset_local_state(False)
             return
+        self._sync_asset_local_state(True)
         busy = QtWidgets.QTreeWidgetItem(["正在加载素材库…"])
         busy.setIcon(0, icons.tool_icon("clock", theme.colors()["muted"], 16))
         busy.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)  # 占位，不可点
@@ -311,11 +375,14 @@ class AssetsMixin:
         if err:
             self._notify("素材库：%s" % err)
             self._set_asset_preview_empty("素材库加载失败", str(err))
+            self._sync_asset_local_state(False)
             return
         if node is None:
             self._notify("素材库：该文件夹下没有图片素材")
             self._set_asset_preview_empty("没有图片素材", "请检查连接的文件夹或图片格式")
+            self._sync_asset_local_state(False)
             return
+        self._sync_asset_local_state(True)
         self._asset_all_items = all_items
         self._populate_asset_tree(node)
         self._expand_asset_tree_depth(2)
@@ -617,6 +684,7 @@ class AssetsMixin:
                      if flt in it["file"].lower() or flt in it["path"].lower()]
         else:
             items = list(self._asset_cur_items or [])
+        items, size_counts = self._sort_asset_items_for_browse(items)
         total = len(items)
         if total == 0:
             self._set_asset_preview_empty("没有可预览素材", "请选择子分类或换个搜索词")
@@ -629,15 +697,33 @@ class AssetsMixin:
             items = items[:CAP]
         favs = set(config.get_asset_favorites())  # 收藏的置顶标星
         placeholder = self._asset_placeholder_icon(False)
+        last_bucket = None
         for it in items:
+            bucket, area, long_edge, size_label = self._asset_visual_meta(it["path"])
+            if bucket != last_bucket:
+                hdr = QtWidgets.QListWidgetItem(self._asset_bucket_title(bucket))
+                hdr.setData(QtCore.Qt.ItemDataRole.UserRole, None)
+                hdr.setData(QtCore.Qt.ItemDataRole.UserRole + 4, "header")
+                hdr.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
+                hdr.setSizeHint(QtCore.QSize(self.asset_fs_list.gridSize().width(), 24))
+                f = hdr.font()
+                f.setBold(True)
+                hdr.setFont(f)
+                hdr.setForeground(QtGui.QBrush(QtGui.QColor(theme.colors()["hint"])))
+                lst.addItem(hdr)
+                last_bucket = bucket
             lw = QtWidgets.QListWidgetItem()  # 不解码 icon，只挂路径(拖拽/单击用)+提示
             lw.setIcon(placeholder)
             fav_tag = "已收藏 · " if it["path"] in favs else ""
             cat = self._asset_rel_category(it["path"])
             if flt:
                 lw.setText(self._asset_short_name(it["file"]))
-            lw.setToolTip("%s%s\n分类：%s\n%s" % (fav_tag, it["file"], cat, it["path"]))
+            dims = " · %s" % size_label
+            if area:
+                dims = " · %s · %dpx长边" % (size_label, long_edge)
+            lw.setToolTip("%s%s\n分类：%s%s\n%s" % (fav_tag, it["file"], cat, dims, it["path"]))
             lw.setData(QtCore.Qt.ItemDataRole.UserRole, it["path"])
+            lw.setData(QtCore.Qt.ItemDataRole.UserRole + 4, bucket)
             lst.addItem(lw)
         lst.setUpdatesEnabled(True)
         if hasattr(self, "asset_fs_count"):
@@ -645,9 +731,13 @@ class AssetsMixin:
                 self.asset_fs_count.setText("%d/%d" % (CAP, total))
                 self.asset_fs_count.setToolTip("该视图共 %d 张，显前 %d——点子分类或搜索缩小（一类放上万张会卡，建议拆子文件夹）" % (total, CAP))
             elif flt:
-                self.asset_fs_count.setText("搜索 %d" % total); self.asset_fs_count.setToolTip("")
+                self.asset_fs_count.setText("搜索 %d" % total)
+                self.asset_fs_count.setToolTip("按尺寸排序：小图标 %d / 中等 %d / 大图合集 %d" % (
+                    size_counts.get(0, 0), size_counts.get(1, 0), size_counts.get(2, 0)))
             else:
-                self.asset_fs_count.setText("%d 张" % total); self.asset_fs_count.setToolTip("")
+                self.asset_fs_count.setText("%d 张" % total)
+                self.asset_fs_count.setToolTip("当前分类按视觉尺寸排序：小图标 %d / 中等 %d / 大图合集 %d" % (
+                    size_counts.get(0, 0), size_counts.get(1, 0), size_counts.get(2, 0)))
         self._thumb_timer.start()  # 布局就绪后解码首屏可见（去抖定时器）
 
     def _apply_asset_search(self):
@@ -663,6 +753,8 @@ class AssetsMixin:
 
     def _asset_hovered(self, item):
         path = item.data(QtCore.Qt.ItemDataRole.UserRole) if item is not None else None
+        if not path:
+            return
         if path:
             self._update_asset_preview(path)
 
@@ -678,31 +770,32 @@ class AssetsMixin:
         reader = QtGui.QImageReader(path)
         reader.setAutoTransform(True)
         sz = reader.size()
-        folder = _os.path.basename(_os.path.dirname(path)) or "素材"
         rel_dir = self._asset_rel_category(path)
-        meta = folder
+        ext = _os.path.splitext(path)[1].lstrip(".").upper() or "IMAGE"
+        fav = "已收藏" if path in set(config.get_asset_favorites()) else "未收藏"
+        meta_parts = [ext, fav]
         if sz.isValid():
-            meta = "%s · %d×%d" % (meta, sz.width(), sz.height())
-            target = QtCore.QSize(220, 150)
+            meta_parts.insert(0, "%d×%d" % (sz.width(), sz.height()))
+            target = QtCore.QSize(250, 172)
             scaled = QtCore.QSize(sz)
             scaled.scale(target, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
             reader.setScaledSize(scaled)
         img = reader.read()
         if img.isNull():
             icon = self._asset_placeholder_icon(True)
-            pm = icon.pixmap(QtCore.QSize(112, 112))
-            meta = meta + " · 预览失败"
+            pm = icon.pixmap(QtCore.QSize(144, 144))
+            meta_parts.append("预览失败")
         else:
             pm = QtGui.QPixmap.fromImage(img).scaled(
-                220, 150, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                250, 172, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                 QtCore.Qt.TransformationMode.SmoothTransformation)
         self.asset_preview_thumb.setPixmap(pm)
         self.asset_preview_name.setText(_os.path.basename(path))
-        self.asset_preview_meta.setText(meta)
+        self.asset_preview_meta.setText(" · ".join(meta_parts))
         self.asset_preview_name.setToolTip(path)
         self.asset_preview_meta.setToolTip(path)
         if hasattr(self, "asset_preview_path"):
-            self.asset_preview_path.setText(rel_dir)
+            self.asset_preview_path.setText(rel_dir.replace(" / ", "  ›  "))
             self.asset_preview_path.setToolTip(path)
         self._sync_preview_actions(True, path)
 
@@ -720,6 +813,18 @@ class AssetsMixin:
             return
         self._toggle_fs_favorite(path)
         self._sync_preview_actions(True, path)
+        self._update_asset_preview(path)
+
+    def _reveal_preview_asset(self):
+        path = getattr(self, "_asset_preview_path", "")
+        if path:
+            self._reveal_in_explorer(path)
+
+    def _copy_preview_asset_path(self):
+        path = getattr(self, "_asset_preview_path", "")
+        if path:
+            QtWidgets.QApplication.clipboard().setText(str(path))
+            self._notify("已复制素材路径")
 
     def _lazy_decode_asset_thumbs(self):
         """只解码当前可见(+上下各 30 预读)项的缩略图；已解码的跳过（item 持 icon + 解码标记）。"""
@@ -749,6 +854,9 @@ class AssetsMixin:
             lw = lst.item(r)
             if lw is None or (lw.data(DR) and lw.data(DSZ) == base):
                 continue
+            if lw.data(QtCore.Qt.ItemDataRole.UserRole + 4) == "header":
+                lw.setData(DR, True); lw.setData(DSZ, base)
+                continue
             rd = QtGui.QImageReader(lw.data(QtCore.Qt.ItemDataRole.UserRole))  # 缩放解码，不全解大图
             rd.setAutoTransform(True)
             sz = rd.size()
@@ -757,6 +865,7 @@ class AssetsMixin:
                 rd.setScaledSize(sz)
             img = rd.read()
             if not img.isNull():
+                img = self._trim_transparent_qimage(img.convertToFormat(QtGui.QImage.Format.Format_ARGB32))
                 pm = QtGui.QPixmap.fromImage(img)
                 if pm.width() < TH and pm.height() < TH:  # 小图标放大到格子大小，看得清（大图已缩放解码）
                     pm = pm.scaled(TH, TH, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
@@ -889,8 +998,8 @@ class AssetsMixin:
         menu.addAction(icons.tool_icon("crop", tc["text"], 16), "拆分此合集为单个图标…", lambda: self._split_one_montage(path))
         menu.addSeparator()
         section = QtGui.QAction("文件", menu); section.setEnabled(False); menu.addAction(section)
-        menu.addAction("在资源管理器中显示", lambda: self._reveal_in_explorer(path))
-        menu.addAction("复制文件路径", lambda: QtWidgets.QApplication.clipboard().setText(str(path)))
+        menu.addAction(icons.tool_icon("folder", tc["text"], 16), "在资源管理器中显示", lambda: self._reveal_in_explorer(path))
+        menu.addAction(icons.tool_icon("copy", tc["text"], 16), "复制文件路径", lambda: QtWidgets.QApplication.clipboard().setText(str(path)))
         menu.exec(self.asset_fs_list.mapToGlobal(pos))
 
     def _toggle_fs_favorite(self, path):

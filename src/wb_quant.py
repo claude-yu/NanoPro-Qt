@@ -13,12 +13,17 @@ import numpy as np
 
 
 # ---------- 预处理：灰度 + 极性 ----------
-def to_gray(img) -> np.ndarray:
-    """任意图 → 单通道 float(0..255)。RGB 用感知亮度，RGBA 忽略 alpha。"""
+def to_gray(img, weighted: bool = False) -> np.ndarray:
+    """任意图 → 单通道 float(0..255)。RGBA 忽略 alpha。
+    weighted=False（默认，对齐 ImageJ Image>Type>8-bit 默认）：RGB→(R+G+B)/3 非加权；
+    weighted=True（ImageJ 勾选 Weighted RGB Conversions）：0.299R+0.587G+0.114B 感知亮度。"""
     a = np.asarray(img).astype(np.float64)
     if a.ndim == 3:
         if a.shape[2] >= 3:
-            a = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+            if weighted:
+                a = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+            else:
+                a = (a[..., 0] + a[..., 1] + a[..., 2]) / 3.0   # ImageJ 默认
         else:
             a = a[..., 0]
     return np.clip(a, 0, 255)

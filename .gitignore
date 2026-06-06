@@ -38,8 +38,8 @@ src/_*.csv
 src/_*.tif
 src/_*.tiff
 src/_*.ijm
+src/_*.png
 ui_review/
-src/gel_analyzer.py
 
 # ===== 编辑器 / 系统 =====
 .vscode/

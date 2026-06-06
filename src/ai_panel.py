@@ -75,7 +75,7 @@ class StyleLibraryDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(inner); v.setSpacing(6)
         for t in themes:
             head = QtWidgets.QLabel(t["name"] + (("  ·  " + t["keywords"]) if t.get("keywords") else ""))
-            head.setStyleSheet("font-weight:700; margin-top:6px;")
+            head.setObjectName("librarySectionTitle")
             head.setWordWrap(True)
             v.addWidget(head)
             grid_host = QtWidgets.QWidget(); grid = QtWidgets.QGridLayout(grid_host)
@@ -499,7 +499,7 @@ class AiPanel(QtWidgets.QWidget):
 
         # —— 任务列表（取代单条进度条；每点一次生图=并行多开一个任务行）——
         thead = QtWidgets.QHBoxLayout()
-        tlbl = QtWidgets.QLabel("任务"); tlbl.setStyleSheet("font-weight:700;")
+        tlbl = QtWidgets.QLabel("任务"); tlbl.setObjectName("taskSectionTitle")
         thead.addWidget(tlbl)
         self.task_count_lbl = QtWidgets.QLabel(""); self.task_count_lbl.setObjectName("hint")
         thead.addWidget(self.task_count_lbl); thead.addStretch(1)
@@ -519,7 +519,7 @@ class AiPanel(QtWidgets.QWidget):
         self._refresh_task_header()
 
         self.status = QtWidgets.QLabel(""); self.status.setWordWrap(True)
-        self.status.setObjectName("hint")  # 走主题 QSS，深浅自适应
+        self.status.setObjectName("aiStatus")
         lay.addWidget(self.status)
         self._sync_by_model()
         for b in self.findChildren(QtWidgets.QAbstractButton):  # 全部按钮手型光标
@@ -749,8 +749,9 @@ class AiPanel(QtWidgets.QWidget):
 
     def _set_status(self, msg, err=False):
         self.status.setText(msg or "")
-        c = theme.colors()
-        self.status.setStyleSheet("font-size:11px; color:%s;" % (c["danger"] if err else c["hint"]))
+        self.status.setProperty("error", bool(err))
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
 
     def _set_key_stat(self, has, hint=""):
         # key 状态并进折叠标题（Key✓/未设 Key），去掉旧独立红 banner（对齐对话面板）。
@@ -895,15 +896,16 @@ class AiPanel(QtWidgets.QWidget):
         full = p["prompt"]
         psum = full if len(full) <= 28 else full[:27] + "…"
         plbl = QtWidgets.QLabel("#%d  %s" % (t.id, psum)); plbl.setToolTip(full)
-        plbl.setStyleSheet("font-size:11px;")
+        plbl.setObjectName("taskTitle")
         mid.addWidget(plbl)
         slbl = QtWidgets.QLabel("%s · %s · %s · ×%d" % (p["model"], p["res"], p["ratio"], p["total"]))
-        slbl.setObjectName("hint"); slbl.setStyleSheet("font-size:10px;")
+        slbl.setObjectName("taskMeta")
         mid.addWidget(slbl)
         prow = QtWidgets.QHBoxLayout(); prow.setContentsMargins(0, 0, 0, 0); prow.setSpacing(4)
         bar = QtWidgets.QProgressBar(); bar.setRange(0, 100); bar.setTextVisible(False); bar.setFixedHeight(6)
-        bar_text = QtWidgets.QLabel(""); bar_text.setStyleSheet("font-size:10px;")
-        state_label = QtWidgets.QLabel(""); state_label.setStyleSheet("font-size:10px;")
+        bar.setObjectName("taskProgress")
+        bar_text = QtWidgets.QLabel(""); bar_text.setObjectName("taskProgressText")
+        state_label = QtWidgets.QLabel(""); state_label.setObjectName("taskState")
         state_label.setWordWrap(True)
         state_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         prow.addWidget(bar, 1); prow.addWidget(bar_text); prow.addWidget(state_label)
@@ -962,9 +964,10 @@ class AiPanel(QtWidgets.QWidget):
             if t.state == "failed" and t.last_err:
                 _e = t.last_err if len(t.last_err) <= 80 else t.last_err[:79] + "…"
                 txt += "：" + _e
-        c = theme.colors()
-        col = c["danger"] if t.state == "failed" else c.get("hint", "#888")
-        t.state_label.setText(txt); t.state_label.setStyleSheet("font-size:10px; color:%s;" % col)
+        t.state_label.setText(txt)
+        t.state_label.setProperty("error", t.state == "failed")
+        t.state_label.style().unpolish(t.state_label)
+        t.state_label.style().polish(t.state_label)
         if t.state == "done":
             t.bar.setRange(0, 100); t.bar.setValue(100); t.bar_text.setText("")
         elif t.state == "queued":

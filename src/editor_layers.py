@@ -96,6 +96,8 @@ class LayersMixin:
         self.layer_list.blockSignals(False)
         if hasattr(self, "layer_stack"):
             self.layer_stack.setCurrentWidget(self.layer_list if self.layers else self.layer_empty)
+        if hasattr(self, "_update_info"):
+            self._update_info()
 
     def _vector_thumb(self, layer: dict) -> QtGui.QPixmap:
         """矢量层缩略图：把该层所有顶层 item 渲到 THUMB×THUMB（按其场景包围盒缩放）。空则返回占位。"""

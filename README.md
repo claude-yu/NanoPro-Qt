@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <b>PS 的像素编辑　·　BioRender 的素材拼图　·　AI 生成与抠图</b><br>
-  一个本地、离线可用、数据不上云的科研制图工作台。
+  <b>PS 的像素编辑　·　BioRender 的素材拼图　·　ImageJ 的 WB 灰度定量　·　AI 生成与抠图</b><br>
+  一个本地、离线可用、数据不上云的科研制图与定量工作台。
 </p>
 
 <p align="center">
@@ -14,6 +14,7 @@
   <img alt="PySide6" src="https://img.shields.io/badge/PySide6-6.11-41CD52?logo=qt&logoColor=white">
   <img alt="Platform" src="https://img.shields.io/badge/Windows-onedir%20%2F%20installer-0078D6?logo=windows&logoColor=white">
   <img alt="Offline AI" src="https://img.shields.io/badge/AI%20抠图-可完全离线-success">
+  <img alt="WB densitometry" src="https://img.shields.io/badge/WB灰度定量-对齐%20ImageJ-FF6F00">
 </p>
 
 > 基于 **PySide6 + QGraphicsView + NumPy/OpenCV**。对标 Photoshop / BioRender 的核心工作流，内置 AI 生成、AI 抠图与本地离线抠图。**所有 API Key 只存在你本机，绝不进程序、日志或仓库。**
@@ -64,6 +65,16 @@
 - 在线可选：grsai 图生图编辑 / PPIO Qwen-Image-Edit / OpenAI image-edit 兼容中转 / rembg
 - 配合**魔棒 / GrabCut / 套索**像素级精修；自动拆解把整图分成独立透明素材
 
+### 🔬 WB 灰度定量 —— 对齐 ImageJ Gel Analyzer
+
+Western blot 条带灰度定量，**复刻 ImageJ Gel Analyzer 工作流并校准到逐位一致**（同框 IntDen 对 Fiji headless 测量 **0% 误差**；密度曲线对 ImageJ `getProfile` **4.7e-5**）。插件菜单「🔬 WB 灰度定量分析」。
+
+- **两条路径**：① **🤖 智能检测条带**（SciEdit 特色，ImageJ 没有）—— 自动把每条带各框一个框、出曲线，框可单独拖角缩放微调；② **Ctrl+1/2/3** —— ImageJ 原汁原味手动选道
+- **密度曲线 = ImageJ Plot Lanes**：所有泳道竖向堆叠，每条独立**拖橙锚点调直线基线 · 拖绿分隔线分峰 · 双击加线 · 右键删**（吸附谷底）
+- **读图按 ImageJ 口径**：调色板 TIF 用原始索引、16/32-bit 按显示范围缩放、RGB→8bit 默认 (R+G+B)/3、中位数自动判极性（TIF/JPG 都峰朝上，不用转格式）
+- **批量审核版**：多张图一屏，左列表 + 中预览（可编辑检测框，一眼核对）+ 右汇总表；某张泳道数不同可单独改带数重检测 → 长/宽表 CSV（归一化在 Excel）
+- 背景：峰脚直线扣除 / 环形 / Rolling-ball；内参归一化；Marker 排除；测量(框带 IntDen) 与 凝胶峰面积 两种量化口径
+
 ### ⚡ 其它打磨
 
 - **启动秒开**：大素材库扫描挪到后台线程，窗口构造 9.3s → **0.1s**
@@ -80,6 +91,7 @@
 | 像素编辑 / 抠图 / 蒙版 | ✅ | ✅ | ❌ |
 | 素材拼图 + 智能连接线 | ✅ | ❌ | ✅ |
 | AI 生成配图 | ✅ | ⚠️ 插件 | ❌ |
+| WB 灰度定量（对齐 ImageJ） | ✅ | ❌ | ❌ |
 | 矢量导入再编辑（SVG/PDF） | ✅ | ⚠️ | ⚠️ |
 | TIFF 300dpi 投稿导出 | ✅ | ✅ | ⚠️ 付费 |
 | 本地 / 离线 / 免费 / 数据私有 | ✅ | ❌ | ❌ |
@@ -97,6 +109,8 @@
 **绘制与文字** 画笔 / 橡皮（脏矩形局部刷新）；画布内打字、拖框定宽、旋转、即时生效
 
 **矢量** SVG / PDF 导入，元素级改色 / 改字 / 配色助手（Okabe-Ito）/ 钢笔 / 锚点编辑 / 形状（矩形·椭圆·直线·箭头）/ 打组解组，导出 SVG
+
+**WB 灰度定量** 复刻 ImageJ Gel Analyzer（校准到逐位一致）；智能检测每带一框 / ImageJ Ctrl 选道；多泳道堆叠密度曲线（基线·分隔线可拖）；批量审核多图；CSV 导出
 
 **导出与工程** PNG / TIFF（写 300 DPI）；保存 / 加载工程 `.nanopro.json`（图层 + 蒙版 + 矢量 + 素材）
 
