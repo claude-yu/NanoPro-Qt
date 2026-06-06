@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from style_lib import IMG_EXTS  # 复用同一份扩展名集合，避免两处维护漂移
+
+BATCH_DIR_RE = re.compile(r"^第\d{4}-\d{4}批$")
 
 
 def _scan_items(d: Path):
@@ -33,7 +36,8 @@ def _scan_items_recursive(d: Path):
 def scan_asset_tree(root):
     """扫描成【文件夹树】（BioRender 式分类→子分类）：每个文件夹一个节点
     {name, path, items:[直属图 {file,path}], children:[子节点]}。
-    点某节点只加载它的【直属】图(不递归) → 每次只显几十张，上万素材也不卡。
+    点某节点只加载它的【直属】图；但隐藏「第0001-0080批」这类物理分页目录，
+    把分页里的图合并到父语义分类。UI 只暴露语义分类，不让用户打开一堆批次文件夹。
     返回 (root_node, all_items, err)；all_items=全树拍平(供全局搜索)。坏子目录跳过，不抛。"""
     if not root:
         return None, [], "未指定素材文件夹"
@@ -57,7 +61,10 @@ def scan_asset_tree(root):
                     items.append(rec); all_items.append(rec)
                 elif e.is_dir():
                     ch = build(e.path)
-                    if ch["items"] or ch["children"]:  # 跳过空文件夹
+                    if BATCH_DIR_RE.match(e.name):
+                        items.extend(ch["items"])
+                        children.extend(ch["children"])
+                    elif ch["items"] or ch["children"]:  # 跳过空文件夹
                         children.append(ch)
             except Exception:
                 continue

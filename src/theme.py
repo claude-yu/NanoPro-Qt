@@ -106,9 +106,14 @@ QListWidget::item:selected { background: @row_active@; }
 QListWidget#layerList::item:selected { background: transparent; }
 QListWidget#layerList::item:hover { background: transparent; }
 QListWidget#assetGrid { background: @base@; }
-QListWidget#assetGrid::item { border: 1px solid @border@; border-radius: 5px; background: @thumb@; }
-QListWidget#assetGrid::item:hover { border-color: @accent@; }
+QListWidget#assetGrid::item { border: 1px solid @border@; border-radius: 7px; background: @thumb@; margin: 3px; }
+QListWidget#assetGrid::item:hover { border-color: @accent@; background: @button_hover@; }
 QListWidget#assetGrid::item:selected { border: 1px solid @accent@; background: @row_active@; }
+QTreeWidget#assetTree { background: @base@; border: 1px solid @border@; border-radius: 7px; padding: 4px; outline: none; }
+QTreeWidget#assetTree::item { min-height: 23px; padding: 2px 4px; border-radius: 5px; }
+QTreeWidget#assetTree::item:hover { background: @button_hover@; }
+QTreeWidget#assetTree::item:selected { background: @row_active@; color: @text@; }
+QLabel#assetPath { color: @text@; font-weight: 600; padding: 2px 1px; }
 
 /* 素材库顶部分段 Tab（本地库 / 抠出素材）—— BioRender 式 pill 分段 */
 QTabBar#assetTabs { qproperty-drawBase: 0; }
@@ -138,8 +143,15 @@ QToolButton#sectionToggle:hover { color: @accent@; }
 #layerRow { border-left: 3px solid transparent; border-radius: 6px; }
 #layerRow[active="true"] { background: @row_active@; border-left: 3px solid @accent@; }
 QLabel#layerThumb { background: @thumb@; border: 1px solid @border@; border-radius: 5px; }
-#groupHeader { background: @row_active@; border-radius: 6px; }
+QToolButton#layerLock { border: 1px solid transparent; border-radius: 6px; padding: 3px; }
+QToolButton#layerLock:hover { background: @button_hover@; border-color: @button_border@; }
+QToolButton#layerLock:checked { background: @row_active@; border-color: @accent@; }
+QToolButton#layerAction { color: @muted@; border: 1px solid transparent; border-radius: 6px; padding: 2px; font-size: 10px; }
+QToolButton#layerAction:hover { background: @button_hover@; color: @text@; border-color: @button_border@; }
+#groupHeader { background: @row_active@; border-left: 3px solid transparent; border-radius: 6px; }
+#groupHeader[active="true"] { border-left: 3px solid @accent@; }
 QLabel#groupName { font-weight: 600; }
+QFrame#layerDropLine { background: @accent@; border: none; border-radius: 1px; }
 
 /* —— AI 浮窗的 ✨ 星按钮：用强调色 token，切主题随之变色 —— */
 QToolButton#pluginStar { background: @accent@; color: @on_accent@; border: none; border-radius: 19px; font-size: 19px; }

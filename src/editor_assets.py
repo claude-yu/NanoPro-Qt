@@ -79,6 +79,9 @@ class AssetsMixin:
             self.asset_tabbar.setTabText(1, "抠出素材 %d" % n)
 
     def _asset_clicked(self, item):
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        if mods & (QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier):
+            return
         i = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if i is None or not (0 <= i < len(self.assets)):
             return
@@ -208,10 +211,12 @@ class AssetsMixin:
             return
         self._asset_all_items = all_items
         self._populate_asset_tree(node)
-        top = self.asset_tree.topLevelItem(0)
+        self._expand_asset_tree_depth(2)
+        top = self._first_asset_node_with_items()
         if top is not None:
             self.asset_tree.setCurrentItem(top)
             self._asset_cur_items = top.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
+            self._set_asset_path_label(top)
         self._refresh_asset_thumbs()
         self.op_label.setText("素材库：%d 张，已按文件夹分类（点分类树浏览/搜索）" % len(all_items))
 
@@ -233,6 +238,54 @@ class AssetsMixin:
         self.asset_tree.addTopLevelItem(fav); self.asset_tree.addTopLevelItem(rec)
         add(None, node).setExpanded(True)  # 根展开，露出一级分类
 
+    def _expand_asset_tree_depth(self, depth: int):
+        """默认展开到 BioRender 式浏览深度：顶层领域和二级主题直接可见，物理批次不暴露。"""
+        def walk(item, level):
+            if item is None:
+                return
+            item.setExpanded(level < depth)
+            for i in range(item.childCount()):
+                walk(item.child(i), level + 1)
+        for i in range(self.asset_tree.topLevelItemCount()):
+            walk(self.asset_tree.topLevelItem(i), 0)
+
+    def _first_asset_node_with_items(self):
+        def walk(item):
+            if item is None:
+                return None
+            if not item.data(0, self._ASSET_MARK) and (item.data(0, QtCore.Qt.ItemDataRole.UserRole) or []):
+                return item
+            for i in range(item.childCount()):
+                found = walk(item.child(i))
+                if found is not None:
+                    return found
+            return None
+        for i in range(self.asset_tree.topLevelItemCount()):
+            found = walk(self.asset_tree.topLevelItem(i))
+            if found is not None:
+                return found
+        return None
+
+    def _asset_item_path(self, item):
+        parts = []
+        cur = item
+        while cur is not None:
+            mark = cur.data(0, self._ASSET_MARK)
+            text = cur.text(0)
+            if mark:
+                return text
+            if text:
+                parts.append(text.split("（", 1)[0])
+            cur = cur.parent()
+        parts.reverse()
+        if parts and parts[0].startswith("00_"):
+            parts = parts[1:]
+        return " / ".join(parts) if parts else "素材库"
+
+    def _set_asset_path_label(self, item):
+        if hasattr(self, "asset_path_label"):
+            self.asset_path_label.setText(self._asset_item_path(item))
+
     def _items_from_paths(self, paths):
         import os
         return [{"file": os.path.basename(p), "path": p} for p in paths]
@@ -247,6 +300,7 @@ class AssetsMixin:
             self._asset_cur_items = self._items_from_paths(config.get_asset_recent())
         else:
             self._asset_cur_items = item.data(0, QtCore.Qt.ItemDataRole.UserRole) or []
+        self._set_asset_path_label(item)
         self.asset_search.blockSignals(True); self.asset_search.clear(); self.asset_search.blockSignals(False)
         self._asset_filter = ""
         self._refresh_asset_thumbs()
@@ -452,16 +506,23 @@ class AssetsMixin:
         lst.setUpdatesEnabled(True)
         if hasattr(self, "asset_fs_count"):
             if capped:
-                self.asset_fs_count.setText("共%d·显%d" % (total, CAP))
+                self.asset_fs_count.setText("%d/%d" % (CAP, total))
                 self.asset_fs_count.setToolTip("该视图共 %d 张，显前 %d——点子分类或搜索缩小（一类放上万张会卡，建议拆子文件夹）" % (total, CAP))
             elif flt:
-                self.asset_fs_count.setText("找到%d" % total); self.asset_fs_count.setToolTip("")
+                self.asset_fs_count.setText("搜索 %d" % total); self.asset_fs_count.setToolTip("")
             else:
-                self.asset_fs_count.setText(str(total)); self.asset_fs_count.setToolTip("")
+                self.asset_fs_count.setText("%d 张" % total); self.asset_fs_count.setToolTip("")
         self._thumb_timer.start()  # 布局就绪后解码首屏可见（去抖定时器）
 
     def _apply_asset_search(self):
         self._asset_filter = self.asset_search.text().strip().lower()
+        if hasattr(self, "asset_path_label"):
+            if self._asset_filter:
+                self.asset_path_label.setText("全库搜索")
+            elif self.asset_tree.currentItem() is not None:
+                self._set_asset_path_label(self.asset_tree.currentItem())
+            else:
+                self.asset_path_label.setText("选择分类")
         self._refresh_asset_thumbs()
 
     def _lazy_decode_asset_thumbs(self):
@@ -471,10 +532,18 @@ class AssetsMixin:
         if n == 0:
             return
         vp = lst.viewport().rect()
-        first = lst.indexAt(vp.topLeft()); last = lst.indexAt(vp.bottomRight())
-        a = first.row() if first.isValid() else 0
-        b = last.row() if last.isValid() else (a + 60)   # 布局未就绪/视口超出 → 只解码前一截，绝不误解全部
-        a = max(0, a - 30); b = min(n - 1, b + 30)
+        grid = lst.gridSize()
+        cell_w = max(1, grid.width())
+        cell_h = max(1, grid.height())
+        cols = max(1, vp.width() // cell_w)
+        sb = lst.verticalScrollBar()
+        visible_rows = max(1, vp.height() // cell_h + 2)
+        total_rows = max(1, (n + cols - 1) // cols)
+        ratio = sb.value() / max(1, sb.maximum())
+        first_row = int(max(0, total_rows - visible_rows) * ratio)
+        prefetch_rows = 3
+        a = max(0, (first_row - prefetch_rows) * cols)
+        b = min(n - 1, (first_row + visible_rows + prefetch_rows) * cols - 1)
         base = max(48, lst.iconSize().width())   # 逻辑像素的目标缩略图边长
         dpr = max(1.0, self.devicePixelRatioF())  # 高分屏：按物理像素解码再标 dpr → 大且清晰，不糊不缩
         TH = int(round(base * dpr))               # 实际解码到的物理像素边长
@@ -592,6 +661,9 @@ class AssetsMixin:
 
     def _fs_asset_clicked(self, item):
         """本地素材【单击】→ 放到画布中央（与拖到指定位置并存，对齐「抠出素材」单击放回画布）。"""
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        if mods & (QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.ShiftModifier):
+            return
         path = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if not path:
             return

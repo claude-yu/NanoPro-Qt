@@ -3,6 +3,7 @@ PySide6>=6.11          # Qt6 GUI 框架（QGraphicsView 画布 / 控件）
 PySide6-QtAds          # Qt Advanced Docking System 的 PySide6 绑定（停靠面板）
 numpy>=2.0             # 图像数组运算（选区 / 蒙版 / 合成）
 opencv-python>=4.10    # 图像处理（魔棒 / 去背景 / 编解码）
+Pillow>=10             # WB/TIFF/调色板图读取
 onnxruntime>=1.20      # 本地离线抠图推理（u2netp.onnx，CPU）
 certifi                # HTTPS CA 证书（AI 联网调用）
 lxml                   # SVG 解析 / 写出（矢量图层）

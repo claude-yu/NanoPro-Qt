@@ -34,6 +34,10 @@ ai_i2i_test.png
 _verify_*.py
 src/_*.svg
 src/_*.py
+src/_*.csv
+src/_*.tif
+src/_*.tiff
+src/_*.ijm
 
 # ===== 编辑器 / 系统 =====
 .vscode/

@@ -92,7 +92,7 @@ class LayerRow(QtWidgets.QWidget):
     """图层面板一行（PS 式）：👁 显隐 + 大缩略图 + 名称 + 右侧锁；双击重命名；激活层高亮。
     层级调整(▲▼)/删除/勾选打组收进【右键菜单】，常用操作走面板底部图标栏（更贴 PS）。"""
 
-    THUMB = 56  # PS 式大缩略图
+    THUMB = 58  # PS 式大缩略图
 
     def __init__(self, editor, layer: dict, thumb: QtGui.QPixmap, indent: bool = False, marked: bool = False):
         super().__init__()
@@ -108,68 +108,194 @@ class LayerRow(QtWidgets.QWidget):
         self.eye = QtWidgets.QToolButton()
         self.eye.setAutoRaise(True); self.eye.setCheckable(True)
         self.eye.setChecked(layer.get("visible", True))
-        self.eye.setIconSize(QtCore.QSize(16, 16)); self.eye.setFixedSize(22, 24)
+        self.eye.setIconSize(QtCore.QSize(20, 20)); self.eye.setFixedSize(28, 30)
         self.eye.setIcon(icons.eye_icon(self.eye.isChecked(), c["text"]))
         self.eye.setToolTip("显示 / 隐藏该层（隐藏的层不导出）")
         self.eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.eye.toggled.connect(lambda v: self.eye.setIcon(icons.eye_icon(v, theme.colors()["text"])))
         self.eye.clicked.connect(lambda *_: editor._set_layer_visible(layer, self.eye.isChecked()))
+        self.eye.installEventFilter(self)
         thumb_lbl = QtWidgets.QLabel()
         thumb_lbl.setObjectName("layerThumb")  # 边框/底色/圆角走主题 QSS(#layerThumb)
         thumb_lbl.setFixedSize(self.THUMB, self.THUMB)
         thumb_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         thumb_lbl.setPixmap(thumb)
+        thumb_lbl.setToolTip("Ctrl 点缩略图：载入该层像素为选区；Ctrl+Shift 加选，Ctrl+Alt 减选")
+        thumb_lbl.installEventFilter(self)
+        thumb_lbl._layer_row = self
         mk_txt = "  ◼" if marked else ""  # 已勾选打组的层在名称后加标记（◻ 行内按钮已撤，勾选走右键菜单）
         self.name_lbl = QtWidgets.QLabel(layer["name"] + mk_txt)
         self.name_lbl.setMinimumWidth(20)  # 名称可被压缩，给右侧锁让位
         self.name_lbl.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.name_lbl.installEventFilter(self)
         self.lock = QtWidgets.QToolButton()
         self.lock.setAutoRaise(True); self.lock.setCheckable(True)
         self.lock.setChecked(layer.get("locked", False))
-        self.lock.setIconSize(QtCore.QSize(16, 16)); self.lock.setFixedSize(22, 24)
+        self.lock.setObjectName("layerLock")
+        self.lock.setIconSize(QtCore.QSize(22, 22)); self.lock.setFixedSize(32, 32)
         self.lock.setIcon(icons.lock_icon(self.lock.isChecked(), c["text"]))
         self.lock.setToolTip("锁定该层（锁后不能移动/涂改，常用于锁住底图）")
         self.lock.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self.lock.toggled.connect(lambda v: self.lock.setIcon(icons.lock_icon(v, theme.colors()["text"])))
         self.lock.clicked.connect(lambda *_: editor._set_layer_locked(layer, self.lock.isChecked()))
+        self.lock.installEventFilter(self)
         lay.addWidget(self.eye)
         lay.addWidget(thumb_lbl)
         lay.addWidget(self.name_lbl, 1)
         lay.addWidget(self.lock)  # 锁紧贴右边（PS 锁在行尾）
 
     def mousePressEvent(self, e):
-        # Ctrl 点击图层 → 载入该层像素为选区（PS 载入图层选区）；Ctrl+Shift 加选 / Ctrl+Alt 减选
+        # Ctrl 点击行 = 图层多选；Ctrl 点击缩略图才载入图层像素为选区（见 eventFilter），避免和 PS 式多选冲突。
         mods = e.modifiers()
-        if mods & QtCore.Qt.KeyboardModifier.ControlModifier:
-            mode = ("add" if mods & QtCore.Qt.KeyboardModifier.ShiftModifier
-                    else "subtract" if mods & QtCore.Qt.KeyboardModifier.AltModifier else "new")
-            ed, layer = self._editor, self._layer
-            QtCore.QTimer.singleShot(0, lambda: ed._load_layer_as_selection(layer, mode))  # 延后执行：避免在本行事件里 _refresh_layers 销毁自身
-            e.accept(); return
-        # 普通左键：本行接管（setItemWidget 让列表收不到 press，原生拖拽失效）→ 先选中本行 + 记录拖拽起点。
-        # Shift（范围多选）交回列表默认逻辑。
-        if e.button() == QtCore.Qt.MouseButton.LeftButton and not (mods & QtCore.Qt.KeyboardModifier.ShiftModifier):
-            self._select_self()
+        if e.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._select_self(mods)
             self._press_pos = e.position().toPoint()
+            self._press_global = e.globalPosition().toPoint()
+            self._dragging_layer = False
+            self.grabMouse()
             e.accept(); return
         self._press_pos = None
+        self._press_global = None
+        self._dragging_layer = False
         super().mousePressEvent(e)
 
-    def _select_self(self):
-        """把本行设为列表当前项（触发 currentRowChanged → _on_layer_row 激活该层）。"""
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Type.MouseButtonPress:
+            if ev.button() == QtCore.Qt.MouseButton.RightButton:
+                self._show_context_menu(obj.mapToGlobal(ev.position().toPoint()))
+                ev.accept()
+                return True
+            if ev.button() != QtCore.Qt.MouseButton.LeftButton:
+                return super().eventFilter(obj, ev)
+            mods = ev.modifiers()
+            if obj is not self.name_lbl and mods & QtCore.Qt.KeyboardModifier.ControlModifier:
+                mode = ("add" if mods & QtCore.Qt.KeyboardModifier.ShiftModifier
+                        else "subtract" if mods & QtCore.Qt.KeyboardModifier.AltModifier else "new")
+                ed, layer = self._editor, self._layer
+                QtCore.QTimer.singleShot(0, lambda: ed._load_layer_as_selection(layer, mode))
+                ev.accept()
+                return True
+            if obj in (self.name_lbl,) or isinstance(obj, QtWidgets.QLabel):
+                self._select_self(mods)
+                self._press_global = ev.globalPosition().toPoint()
+                self._dragging_layer = False
+                self.grabMouse()
+                ev.accept()
+                return True
+        elif ev.type() == QtCore.QEvent.Type.MouseMove:
+            if ev.buttons() & QtCore.Qt.MouseButton.LeftButton and getattr(self, "_press_global", None) is not None:
+                moved = (ev.globalPosition().toPoint() - self._press_global).manhattanLength()
+                if moved >= QtWidgets.QApplication.startDragDistance():
+                    if not getattr(self, "_dragging_layer", False):
+                        self._editor.layer_list.begin_ps_drag(self, ev.globalPosition().toPoint())
+                    self._dragging_layer = True
+                    self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+                    self._editor.layer_list.update_ps_drag(ev.globalPosition().toPoint())
+                    ev.accept()
+                    return True
+        elif ev.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            if getattr(self, "_dragging_layer", False):
+                self._finish_layer_drag(ev.globalPosition().toPoint())
+                ev.accept()
+                return True
+            self._press_global = None
+            self._dragging_layer = False
+            self.unsetCursor()
+            self.releaseMouse()
+        elif ev.type() == QtCore.QEvent.Type.MouseButtonDblClick:
+            if isinstance(obj, QtWidgets.QLabel):
+                self._editor._rename_layer(self._layer)
+                ev.accept()
+                return True
+        return super().eventFilter(obj, ev)
+
+    def _select_self(self, mods=QtCore.Qt.KeyboardModifier.NoModifier):
+        """选择本行，但不重建图层列表。
+
+        不能走 setCurrentItem -> currentRowChanged -> _set_active -> _refresh_layers。
+        鼠标刚按下就刷新会销毁当前 LayerRow，后续拖拽状态丢失，表现为图层拖不动。
+        """
         lst = self._editor.layer_list
         for i in range(lst.count()):
             if lst.itemWidget(lst.item(i)) is self:
-                lst.setCurrentItem(lst.item(i)); break
+                item = lst.item(i)
+                lst.blockSignals(True)
+                if mods & QtCore.Qt.KeyboardModifier.ShiftModifier:
+                    anchor = lst.currentRow()
+                    if anchor < 0:
+                        item.setSelected(True)
+                        lst.setCurrentItem(item, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+                    else:
+                        lo, hi = sorted((anchor, i))
+                        for r in range(lst.count()):
+                            it = lst.item(r)
+                            if it.data(QtCore.Qt.ItemDataRole.UserRole) is not None:
+                                it.setSelected(lo <= r <= hi)
+                        lst.setCurrentItem(item, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+                elif mods & QtCore.Qt.KeyboardModifier.ControlModifier:
+                    item.setSelected(not item.isSelected())
+                    lst.setCurrentItem(item, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+                else:
+                    for r in range(lst.count()):
+                        lst.item(r).setSelected(False)
+                    item.setSelected(True)
+                    lst.setCurrentItem(item, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate)
+                lst.blockSignals(False)
+                self._apply_panel_selection_no_refresh()
+                break
+
+    def _apply_panel_selection_no_refresh(self):
+        ed = self._editor
+        by_uid = {l.get("uid"): l for l in ed.layers}
+        selected = []
+        for it in ed.layer_list.selectedItems():
+            lyr = by_uid.get(it.data(QtCore.Qt.ItemDataRole.UserRole))
+            if lyr is not None and lyr.get("visible", True):
+                selected.append(lyr)
+        if self._layer.get("visible", True):
+            ed.active = self._layer
+            if self._layer not in selected:
+                selected.append(self._layer)
+        ed._selected_group = None
+        ed.selected_layers = selected
+        ed._clear_selection()
+        ed._update_outline()
+        ed._sync_opacity_slider()
+        for r in range(ed.layer_list.count()):
+            row = ed.layer_list.itemWidget(ed.layer_list.item(r))
+            if isinstance(row, LayerRow):
+                row.set_active(row._layer is ed.active)
 
     def mouseMoveEvent(self, e):
-        # 左键按住并拖过阈值 → 行内自起 QDrag 做图层重排（弥补 setItemWidget 吞掉的列表原生拖拽）
-        if (e.buttons() & QtCore.Qt.MouseButton.LeftButton) and getattr(self, "_press_pos", None) is not None:
-            if (e.position().toPoint() - self._press_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
-                self._press_pos = None
-                self._start_layer_drag()
+        # 左键按住并拖过阈值 → 进入直接重排模式；松手时按鼠标落点计算目标行。
+        # 不再依赖 Qt 原生 QDrag：setItemWidget 的子控件会吃事件，Windows 上原生拖放不稳定。
+        if e.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            moved = 0
+            if getattr(self, "_press_global", None) is not None:
+                moved = (e.globalPosition().toPoint() - self._press_global).manhattanLength()
+            elif getattr(self, "_press_pos", None) is not None:
+                moved = (e.position().toPoint() - self._press_pos).manhattanLength()
+            if moved >= QtWidgets.QApplication.startDragDistance():
+                if not getattr(self, "_dragging_layer", False):
+                    self._editor.layer_list.begin_ps_drag(self, e.globalPosition().toPoint())
+                self._dragging_layer = True
+                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+                self._editor.layer_list.update_ps_drag(e.globalPosition().toPoint())
+                e.accept()
                 return
         super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == QtCore.Qt.MouseButton.LeftButton and getattr(self, "_dragging_layer", False):
+            self._finish_layer_drag(e.globalPosition().toPoint())
+            e.accept()
+            return
+        self._press_pos = None
+        self._press_global = None
+        self._dragging_layer = False
+        self.unsetCursor()
+        self.releaseMouse()
+        super().mouseReleaseEvent(e)
 
     def _start_layer_drag(self):
         lst = self._editor.layer_list
@@ -186,17 +312,88 @@ class LayerRow(QtWidgets.QWidget):
         drag.setHotSpot(QtCore.QPoint(20, pm.height() // 2))
         drag.exec(QtCore.Qt.DropAction.MoveAction)
 
+    def _finish_layer_drag(self, global_pos: QtCore.QPoint):
+        self._press_pos = None
+        self._press_global = None
+        self._dragging_layer = False
+        self.unsetCursor()
+        self.releaseMouse()
+        self._editor.layer_list.end_ps_drag()
+        lst = self._editor.layer_list
+        src_uid = self._layer.get("uid")
+        pos = lst.viewport().mapFromGlobal(global_pos)
+        dst = lst.itemAt(pos)
+        if src_uid is None:
+            return
+        if dst is None:
+            layer_items = [lst.item(i) for i in range(lst.count())
+                           if lst.item(i).data(QtCore.Qt.ItemDataRole.UserRole) is not None]
+            if not layer_items:
+                return
+            row_rects = [(it, lst.visualItemRect(it)) for it in layer_items]
+            row_rects = [(it, rc) for it, rc in row_rects if rc.isValid()]
+            if not row_rects:
+                return
+            first_rect = row_rects[0][1]
+            last_rect = row_rects[-1][1]
+            if pos.y() <= first_rect.top():
+                self._editor._layer_z("front", self._layer)
+            elif pos.y() >= last_rect.bottom():
+                self._editor._layer_z("back", self._layer)
+            else:
+                for idx in range(len(row_rects) - 1):
+                    upper_item, upper_rect = row_rects[idx]
+                    lower_item, lower_rect = row_rects[idx + 1]
+                    if upper_rect.bottom() <= pos.y() <= lower_rect.top():
+                        lower_uid = lower_item.data(QtCore.Qt.ItemDataRole.UserRole)
+                        if lower_uid is None or lower_uid == src_uid:
+                            return
+                        if isinstance(lower_uid, str) and lower_uid.startswith("group:"):
+                            self._editor._move_layer_to_group(src_uid, lower_uid[6:])
+                        else:
+                            self._editor._reorder_layer(src_uid, lower_uid, True)
+                        return
+            return
+        dst_uid = dst.data(QtCore.Qt.ItemDataRole.UserRole)
+        if dst_uid is None or dst_uid == src_uid:
+            return
+        rect = lst.visualItemRect(dst)
+        before = pos.y() < rect.center().y()
+        if isinstance(dst_uid, str) and dst_uid.startswith("group:"):
+            self._editor._move_layer_to_group(src_uid, dst_uid[6:])
+        else:
+            self._editor._reorder_layer(src_uid, dst_uid, before)
+
     def contextMenuEvent(self, e):
         # 右键菜单：上移/下移层级、勾选打组、重命名、删除（行内按钮收进这里，对齐 PS 靠拖拽+底栏）
+        self._show_context_menu(e.globalPos())
+
+    def _activate_for_menu(self):
         ed, layer = self._editor, self._layer
-        m = QtWidgets.QMenu(self)
+        if layer in ed.layers:
+            ed._selected_group = None
+            ed.active = layer
+            if layer not in ed.selected_layers:
+                ed.selected_layers = [layer]
+            ed._clear_selection()
+            ed._update_outline()
+            ed._reselect_rows_by_uid([l.get("uid") for l in ed.selected_layers])
+            ed._sync_opacity_slider()
+
+    def _build_context_menu(self):
+        ed, layer = self._editor, self._layer
+        m = QtWidgets.QMenu(ed)
         m.addAction("置顶", lambda: ed._layer_z("front", layer))
         m.addAction("上移一层", lambda: ed._move_layer(layer, +1))
         m.addAction("下移一层", lambda: ed._move_layer(layer, -1))
         m.addAction("置底", lambda: ed._layer_z("back", layer))
         m.addSeparator()
+        m.addAction("亮度 / 对比度…", ed.brightness_contrast_dialog)
+        m.addSeparator()
         act_mark = m.addAction("取消勾选打组" if self._marked else "勾选以打组")
         act_mark.triggered.connect(lambda *_: ed._toggle_mark(layer))
+        m.addAction("所选图层打组", ed.do_group)
+        m.addAction("解组", ed.do_ungroup)
         m.addAction("重命名…", lambda: ed._rename_layer(layer))
         if layer.get("kind") != "vector":  # 非破坏图层蒙版（栅格/图片/文字层）
             m.addSeparator()
@@ -205,7 +402,12 @@ class LayerRow(QtWidgets.QWidget):
                 m.addAction("删除蒙版", lambda: ed._delete_mask(layer))
         m.addSeparator()
         m.addAction("删除该层", lambda: ed._delete_specific_layer(layer))
-        m.exec(e.globalPos())
+        return m
+
+    def _show_context_menu(self, global_pos):
+        self._activate_for_menu()
+        m = self._build_context_menu()
+        m.exec(global_pos)
 
     def mouseDoubleClickEvent(self, e):
         self._editor._rename_layer(self._layer)
@@ -219,25 +421,210 @@ class LayerRow(QtWidgets.QWidget):
 
 
 class GroupHeaderRow(QtWidgets.QWidget):
-    """图层面板的组头行：▾/▸ 折叠 + 👁 整组显隐 + 组名(成员数)。"""
+    """图层面板的组头行：像 PS 文件夹层一样可选中、折叠、显隐、右键、拖拽整组。"""
 
-    def __init__(self, editor, gid: str, name: str, count: int, collapsed: bool, any_visible: bool):
+    def __init__(self, editor, gid: str, name: str, count: int, collapsed: bool, any_visible: bool,
+                 any_locked: bool = False, active: bool = False):
         super().__init__()
         self.setObjectName("groupHeader")
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._editor = editor
+        self._gid = gid
         c = theme.colors()
         lay = QtWidgets.QHBoxLayout(self)
-        lay.setContentsMargins(4, 2, 4, 2); lay.setSpacing(4)
+        lay.setContentsMargins(6, 3, 6, 3); lay.setSpacing(5)
         fold = QtWidgets.QToolButton(); fold.setAutoRaise(True); fold.setFixedSize(20, 22)
         fold.setText("▸" if collapsed else "▾"); fold.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         fold.clicked.connect(lambda *_: editor._toggle_collapse(gid))
         eye = QtWidgets.QToolButton(); eye.setAutoRaise(True); eye.setCheckable(True); eye.setChecked(any_visible)
-        eye.setIconSize(QtCore.QSize(16, 16)); eye.setFixedSize(22, 22)
+        eye.setIconSize(QtCore.QSize(20, 20)); eye.setFixedSize(28, 30)
         eye.setIcon(icons.eye_icon(any_visible, c["text"])); eye.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         eye.clicked.connect(lambda *_: editor._set_group_visible(gid, not any_visible))
+        lock = QtWidgets.QToolButton(); lock.setAutoRaise(True); lock.setCheckable(True); lock.setChecked(any_locked)
+        lock.setObjectName("layerLock")
+        lock.setIconSize(QtCore.QSize(22, 22)); lock.setFixedSize(32, 32)
+        lock.setIcon(icons.lock_icon(any_locked, c["text"]))
+        lock.toggled.connect(lambda v: lock.setIcon(icons.lock_icon(v, theme.colors()["text"])))
+        lock.clicked.connect(lambda *_: editor._set_group_locked(gid, lock.isChecked()))
+        lock.setToolTip("锁定/解锁该组全部图层")
         lbl = QtWidgets.QLabel(f"▣ {name} ({count})"); lbl.setObjectName("groupName")  # 加粗走主题 QSS
-        lay.addWidget(fold); lay.addWidget(eye); lay.addWidget(lbl, 1)
+        lay.addWidget(fold); lay.addWidget(eye); lay.addWidget(lbl, 1); lay.addWidget(lock)
+        self.setProperty("active", "true" if active else "false")
+        for child in (fold, eye, lbl, lock):
+            child.installEventFilter(self)
         # 背景/圆角走主题 QSS(#groupHeader)，不再内联 → 切深浅主题自动跟随
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._select_group_no_refresh()
+            self._press_pos = e.position().toPoint()
+            self._press_global = e.globalPosition().toPoint()
+            self._dragging_group = False
+            self.grabMouse()
+            e.accept(); return
+        self._press_pos = None
+        self._press_global = None
+        self._dragging_group = False
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            moved = 0
+            if getattr(self, "_press_global", None) is not None:
+                moved = (e.globalPosition().toPoint() - self._press_global).manhattanLength()
+            elif getattr(self, "_press_pos", None) is not None:
+                moved = (e.position().toPoint() - self._press_pos).manhattanLength()
+            if moved >= QtWidgets.QApplication.startDragDistance():
+                self._dragging_group = True
+                self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+                e.accept()
+                return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == QtCore.Qt.MouseButton.LeftButton and getattr(self, "_dragging_group", False):
+            self._finish_group_drag(e.globalPosition().toPoint())
+            e.accept()
+            return
+        self._press_pos = None
+        self._press_global = None
+        self._dragging_group = False
+        self.unsetCursor()
+        self.releaseMouse()
+        super().mouseReleaseEvent(e)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Type.MouseButtonPress:
+            if ev.button() == QtCore.Qt.MouseButton.RightButton:
+                self._show_context_menu(obj.mapToGlobal(ev.position().toPoint()))
+                ev.accept()
+                return True
+            if ev.button() == QtCore.Qt.MouseButton.LeftButton and isinstance(obj, QtWidgets.QLabel):
+                self._select_group_no_refresh()
+                self._press_global = ev.globalPosition().toPoint()
+                self._dragging_group = False
+                self.grabMouse()
+                ev.accept()
+                return True
+        elif ev.type() == QtCore.QEvent.Type.MouseMove:
+            if ev.buttons() & QtCore.Qt.MouseButton.LeftButton and getattr(self, "_press_global", None) is not None:
+                if (ev.globalPosition().toPoint() - self._press_global).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                    self._dragging_group = True
+                    self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+                    ev.accept()
+                    return True
+        elif ev.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            if getattr(self, "_dragging_group", False):
+                self._finish_group_drag(ev.globalPosition().toPoint())
+                ev.accept()
+                return True
+            self._press_global = None
+            self._dragging_group = False
+            self.unsetCursor()
+            self.releaseMouse()
+        elif ev.type() == QtCore.QEvent.Type.MouseButtonDblClick and isinstance(obj, QtWidgets.QLabel):
+            self._editor._rename_group(self._gid)
+            ev.accept()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _select_group_no_refresh(self):
+        ed, gid = self._editor, self._gid
+        members = [l for l in ed._group_members(gid) if l.get("visible", True)]
+        ed._selected_group = gid
+        ed.selected_layers = members
+        ed.active = members[-1] if members else ed.active
+        ed._clear_selection()
+        ed._update_outline()
+        ed._reselect_rows_by_uid([l.get("uid") for l in members])
+        ed._sync_opacity_slider()
+        for r in range(ed.layer_list.count()):
+            row = ed.layer_list.itemWidget(ed.layer_list.item(r))
+            if isinstance(row, GroupHeaderRow):
+                row.setProperty("active", "true" if row._gid == gid else "false")
+                row.style().unpolish(row); row.style().polish(row)
+
+    def _start_group_drag(self):
+        lst = self._editor.layer_list
+        token = f"group:{self._gid}"
+        lst._drag_uid = token
+        md = QtCore.QMimeData()
+        md.setData(lst.LAYER_MIME, token.encode("utf-8"))
+        drag = QtGui.QDrag(self)
+        drag.setMimeData(md)
+        pm = self.grab()
+        drag.setPixmap(pm)
+        drag.setHotSpot(QtCore.QPoint(20, pm.height() // 2))
+        drag.exec(QtCore.Qt.DropAction.MoveAction)
+
+    def _finish_group_drag(self, global_pos: QtCore.QPoint):
+        self._press_pos = None
+        self._press_global = None
+        self._dragging_group = False
+        self.unsetCursor()
+        self.releaseMouse()
+        lst = self._editor.layer_list
+        pos = lst.viewport().mapFromGlobal(global_pos)
+        dst = lst.itemAt(pos)
+        if dst is None:
+            layer_items = [lst.item(i) for i in range(lst.count())
+                           if lst.item(i).data(QtCore.Qt.ItemDataRole.UserRole) is not None]
+            if not layer_items:
+                return
+            first_rect = lst.visualItemRect(layer_items[0])
+            last_rect = lst.visualItemRect(layer_items[-1])
+            if pos.y() <= first_rect.top():
+                dst_token = layer_items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+                self._editor._reorder_group(self._gid, dst_token, True)
+            elif pos.y() >= last_rect.bottom():
+                dst_token = layer_items[-1].data(QtCore.Qt.ItemDataRole.UserRole)
+                self._editor._reorder_group(self._gid, dst_token, False)
+            return
+        dst_token = dst.data(QtCore.Qt.ItemDataRole.UserRole)
+        if dst_token is None or dst_token == f"group:{self._gid}":
+            return
+        rect = lst.visualItemRect(dst)
+        before = pos.y() < rect.center().y()
+        self._editor._reorder_group(self._gid, dst_token, before)
+
+    def contextMenuEvent(self, e):
+        self._show_context_menu(e.globalPos())
+
+    def _activate_for_menu(self):
+        ed, gid = self._editor, self._gid
+        members = [l for l in ed._group_members(gid) if l.get("visible", True)]
+        ed._selected_group = gid
+        ed.selected_layers = members
+        ed.active = members[-1] if members else ed.active
+        ed._clear_selection()
+        ed._update_outline()
+        ed._reselect_rows_by_uid([l.get("uid") for l in members])
+        ed._sync_opacity_slider()
+
+    def _build_context_menu(self):
+        ed, gid = self._editor, self._gid
+        collapsed = gid in ed._collapsed
+        all_members = ed._group_members(gid)
+        any_visible = any(l.get("visible", True) for l in all_members)
+        any_locked = any(l.get("locked", False) for l in all_members)
+        m = QtWidgets.QMenu(ed)
+        m.addAction("展开组" if collapsed else "折叠组", lambda: ed._toggle_collapse(gid))
+        m.addAction("显示组" if not any_visible else "隐藏组", lambda: ed._set_group_visible(gid, not any_visible))
+        m.addAction("解锁组" if any_locked else "锁定组", lambda: ed._set_group_locked(gid, not any_locked))
+        m.addSeparator()
+        m.addAction("重命名组…", lambda: ed._rename_group(gid))
+        m.addAction("解组（保留图层）", lambda: ed._ungroup_gid(gid))
+        m.addSeparator()
+        m.addAction("删除组及内容", lambda: ed._delete_group(gid))
+        return m
+
+    def _show_context_menu(self, global_pos):
+        self._activate_for_menu()
+        m = self._build_context_menu()
+        m.exec(global_pos)
+
+    def mouseDoubleClickEvent(self, e):
+        self._editor._rename_group(self._gid)
 
 
 class InlineTextEdit(QtWidgets.QTextEdit):
@@ -423,9 +810,13 @@ class DragLayerList(QtWidgets.QListWidget):
         super().__init__()
         self._editor = editor
         self._drag_uid = None  # 拖拽起手记下被拖行的 uid（不靠 currentItem，避免 _refresh_layers 重建后失准）
+        self._ps_drag_label = None
+        self._ps_drop_line = None
+        self._ps_hotspot = QtCore.QPoint(18, 18)
         self.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
         self.setAcceptDrops(True)
+        self.viewport().installEventFilter(self)
 
     def startDrag(self, actions):
         it = self.itemAt(self.mapFromGlobal(QtGui.QCursor.pos())) or self.currentItem()
@@ -458,7 +849,7 @@ class DragLayerList(QtWidgets.QListWidget):
         dst_uid = dst.data(QtCore.Qt.ItemDataRole.UserRole)
         if src_uid is not None and dst_uid is not None and src_uid == dst_uid:
             e.ignore(); return
-        if src_uid is None or dst_uid is None:  # 组头行无 uid → 不参与拖拽
+        if src_uid is None or dst_uid is None:
             e.ignore(); return
         # 落点在目标行的上半还是下半（决定插到目标之前还是之后）。注意列表是「顶层在上」倒序显示，
         # 之前/之后的语义交由 editor._reorder_layer 统一处理（它按显示顺序解释 before）。
@@ -466,7 +857,120 @@ class DragLayerList(QtWidgets.QListWidget):
         before = pos.y() < rect.center().y()
         e.accept()  # 不调 super().dropEvent，避免 Qt 自行搬运毁 widget
         self._drag_uid = None
-        self._editor._reorder_layer(src_uid, dst_uid, before)
+        src_is_group = isinstance(src_uid, str) and src_uid.startswith("group:")
+        dst_is_group = isinstance(dst_uid, str) and dst_uid.startswith("group:")
+        if src_is_group:
+            self._editor._reorder_group(src_uid[6:], dst_uid, before)
+        elif dst_is_group:
+            self._editor._move_layer_to_group(src_uid, dst_uid[6:])
+        else:
+            self._editor._reorder_layer(src_uid, dst_uid, before)
+
+    def begin_ps_drag(self, row: QtWidgets.QWidget, global_pos: QtCore.QPoint):
+        """PS-like layer drag feedback: a floating row snapshot plus an insertion line."""
+        if self._ps_drag_label is None:
+            self._ps_drag_label = QtWidgets.QLabel(self.viewport())
+            self._ps_drag_label.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            eff = QtWidgets.QGraphicsOpacityEffect(self._ps_drag_label)
+            eff.setOpacity(0.78)
+            self._ps_drag_label.setGraphicsEffect(eff)
+        if self._ps_drop_line is None:
+            self._ps_drop_line = QtWidgets.QFrame(self.viewport())
+            self._ps_drop_line.setObjectName("layerDropLine")
+            self._ps_drop_line.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._ps_drop_line.setFixedHeight(3)
+        pm = row.grab()
+        self._ps_drag_label.setPixmap(pm)
+        self._ps_drag_label.resize(pm.size())
+        local = row.mapFromGlobal(global_pos)
+        self._ps_hotspot = QtCore.QPoint(
+            max(0, min(local.x(), max(0, row.width() - 1))),
+            max(0, min(local.y(), max(0, row.height() - 1))),
+        )
+        self._ps_drag_label.raise_()
+        self._ps_drop_line.raise_()
+        self.update_ps_drag(global_pos)
+        self._ps_drag_label.show()
+        self._ps_drop_line.show()
+
+    def update_ps_drag(self, global_pos: QtCore.QPoint):
+        if self._ps_drag_label is None:
+            return
+        pos = self.viewport().mapFromGlobal(global_pos)
+        self._ps_drag_label.move(pos - self._ps_hotspot)
+        y = self._drop_line_y(pos)
+        if y is None:
+            if self._ps_drop_line is not None:
+                self._ps_drop_line.hide()
+            return
+        x = 7
+        self._ps_drop_line.setGeometry(x, max(0, y - 1), max(1, self.viewport().width() - x * 2), 3)
+        self._ps_drop_line.raise_()
+        self._ps_drop_line.show()
+
+    def end_ps_drag(self):
+        if self._ps_drag_label is not None:
+            self._ps_drag_label.hide()
+            self._ps_drag_label.clear()
+        if self._ps_drop_line is not None:
+            self._ps_drop_line.hide()
+
+    def _drop_line_y(self, pos: QtCore.QPoint):
+        rows = []
+        for i in range(self.count()):
+            it = self.item(i)
+            token = it.data(QtCore.Qt.ItemDataRole.UserRole)
+            if token is None:
+                continue
+            rc = self.visualItemRect(it)
+            if rc.isValid():
+                rows.append((it, rc))
+        if not rows:
+            return None
+        first = rows[0][1]
+        last = rows[-1][1]
+        if pos.y() <= first.top():
+            return first.top()
+        if pos.y() >= last.bottom():
+            return last.bottom()
+        hit = self.itemAt(pos)
+        if hit is not None and hit.data(QtCore.Qt.ItemDataRole.UserRole) is not None:
+            rc = self.visualItemRect(hit)
+            return rc.top() if pos.y() < rc.center().y() else rc.bottom()
+        for upper, lower in zip(rows, rows[1:]):
+            if upper[1].bottom() <= pos.y() <= lower[1].top():
+                return (upper[1].bottom() + lower[1].top()) // 2
+        return None
+
+    def _show_row_context_at(self, pos: QtCore.QPoint, global_pos: QtCore.QPoint) -> bool:
+        it = self.itemAt(pos)
+        if it is None:
+            return False
+        row = self.itemWidget(it)
+        if hasattr(row, "_show_context_menu"):
+            row._show_context_menu(global_pos)
+            return True
+        return False
+
+    def contextMenuEvent(self, e):
+        if self._show_row_context_at(e.pos(), e.globalPos()):
+            e.accept()
+            return
+        super().contextMenuEvent(e)
+
+    def viewportEvent(self, e):
+        if e.type() == QtCore.QEvent.Type.ContextMenu:
+            if self._show_row_context_at(e.pos(), e.globalPos()):
+                e.accept()
+                return True
+        return super().viewportEvent(e)
+
+    def eventFilter(self, obj, e):
+        if obj is self.viewport() and e.type() == QtCore.QEvent.Type.ContextMenu:
+            if self._show_row_context_at(e.pos(), e.globalPos()):
+                e.accept()
+                return True
+        return super().eventFilter(obj, e)
 
 
 class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMixin, TextMixin, LayersMixin, SelectionMixin, VectorMixin):
@@ -558,6 +1062,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._group_names = {}           # gid → 组名
         self._collapsed = set()          # 已折叠的 gid
         self._marked = set()             # 已勾选待打组的图层 uid
+        self._selected_group = None      # 当前在图层面板选中的组头（PS 文件夹层）
         self._text_scene_pos = QtCore.QPointF()
         self.selection_mask: np.ndarray | None = None
         # 历史时间线（PS 历史面板）：双撤销/重做栈物理合并成一条线性快照列表 + 当前指针。
@@ -904,6 +1409,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         plug = self.menuBar().addMenu("插件")
         self._plugins = [
             ("✨ AI 生成 / 对话", "生成式 AI 绘图（文生图/图生图）+ AI 对话生成提示词（同一浮窗标签切换）", self._toggle_ai_panel),
+            ("🔬 WB 灰度定量分析…", "Western blot 条带灰度定量（对齐 ImageJ Gel Analyzer）：框泳道/带→IntDen/峰面积/归一化/导出CSV", self._toggle_wb_panel),
         ]
         for name, tip, cb in self._plugins:
             act = plug.addAction(name, cb); act.setToolTip(tip)
@@ -912,6 +1418,19 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         act_seg.setToolTip("配置 AI 分割/抠图后端（HTTP image-edit 兼容 / 本地 rembg）")
         plug.addSeparator()
         more = plug.addAction("（更多工具将并入此处…）"); more.setEnabled(False)
+
+    def _toggle_wb_panel(self):
+        # 开/关 WB 灰度定量浮窗（插件菜单）。懒加载，关闭=隐藏保留状态。
+        if not hasattr(self, "_wb_window"):
+            from wb_analyzer import WBAnalyzerPanel
+            self._wb_window = FloatingToolWindow(self, "WB 灰度定量分析", icons.tool_icon("star", "#27c08a", 16))
+            self._wb_window.set_content(WBAnalyzerPanel(self))
+            self._wb_window.resize(1080, 680)
+        w = self._wb_window
+        if w.isVisible():
+            w.hide()
+        else:
+            w.show(); w.raise_(); w.activateWindow()
 
     def _toggle_ai_panel(self):
         # 开/关 AI 浮窗（点 ✨ 星 或 插件菜单）。自由浮动工具窗，拖动不弹 ADS 落点 overlay。
@@ -1480,16 +1999,20 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         # —— PS 式底部图标工具栏：新建层 / 删除当前层 / 打组 / 解组 / 亮度对比度 ——
         bbar = QtWidgets.QHBoxLayout(); bbar.setSpacing(2)
         tc = theme.colors()["text"]
-        for _ic, _tip, _slot in (
-            ("new_layer", "新建白色图层", self.new_white_layer),
-            ("trash", "删除当前激活图层", self._delete_active),
-            ("group", "打组：把勾选/多选的图层归为一组", self.do_group),
-            ("ungroup", "解组：拆散当前组", self.do_ungroup),
-            ("adjust", "亮度 / 对比度（图像>调整，作用于当前层）", self.brightness_contrast_dialog),
-            ("mask", "图层蒙版：先在该层取选区，再点此从选区生成蒙版（非破坏·选区内露外藏·原图不动；删除走图层右键）", self._mask_from_selection),
+        for _ic, _text, _tip, _slot in (
+            ("new_layer", "新建", "新建白色图层", self.new_white_layer),
+            ("trash", "删除", "删除当前激活图层", self._delete_active),
+            ("group", "打组", "打组：把勾选/多选的图层归为一组", self.do_group),
+            ("ungroup", "解组", "解组：拆散当前组", self.do_ungroup),
+            ("adjust", "明暗", "亮度 / 对比度（图像>调整，作用于当前层）", self.brightness_contrast_dialog),
+            ("mask", "蒙版", "图层蒙版：先在该层取选区，再点此从选区生成蒙版（非破坏·选区内露外藏·原图不动；删除走图层右键）", self._mask_from_selection),
         ):
             tbtn = QtWidgets.QToolButton()
-            tbtn.setIcon(icons.tool_icon(_ic, tc)); tbtn.setIconSize(QtCore.QSize(20, 20))
+            tbtn.setObjectName("layerAction")
+            tbtn.setText(_text)
+            tbtn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            tbtn.setIcon(icons.tool_icon(_ic, tc)); tbtn.setIconSize(QtCore.QSize(22, 22))
+            tbtn.setFixedSize(46, 44)
             tbtn.setAutoRaise(True); tbtn.setToolTip(_tip)
             tbtn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
             tbtn.clicked.connect(lambda _=False, fn=_slot: fn())
@@ -1543,26 +2066,26 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         _gear.setMenu(_gmenu)
         _srow.addWidget(_gear)
         _pl.addLayout(_srow)
-        # 分类树（分类→子分类，点哪个只加载它的直属图 → 海量库不卡）
+        # 分类树（分类→子分类；物理批次目录已在 asset_lib 折叠，UI 只露出语义分类）
         self.asset_tree = QtWidgets.QTreeWidget()
-        self.asset_tree.setHeaderHidden(True); self.asset_tree.setMaximumHeight(150)
-        self.asset_tree.setToolTip("素材分类树（=文件夹结构）。点一个分类→只加载它的直属图；子分类点开再看，不卡。")
+        self.asset_tree.setObjectName("assetTree")
+        self.asset_tree.setHeaderHidden(True)
+        self.asset_tree.setUniformRowHeights(True)
+        self.asset_tree.setAnimated(True)
+        self.asset_tree.setIndentation(14)
+        self.asset_tree.setMinimumHeight(180)
+        self.asset_tree.setMaximumHeight(320)
+        self.asset_tree.setToolTip("素材分类树。点语义分类直接看素材；物理分批目录已隐藏，缩略图按可见区域懒加载。")
         self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
         _pl.addWidget(self.asset_tree)
-        # 缩略图大小滑块（持久化，看不清就拖大）
-        self._asset_thumb = config.get_asset_thumb_size(140)
-        _zrow = QtWidgets.QHBoxLayout()
-        _zrow.addWidget(self._hint("缩略图大小"))
-        self.asset_zoom = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-        self.asset_zoom.setRange(72, 240); self.asset_zoom.setValue(self._asset_thumb)
-        self.asset_zoom.setToolTip("拖动调整素材缩略图大小（看不清就拖大）·会被记住，下次打开保持")
-        self.asset_zoom.valueChanged.connect(self._on_asset_thumb_size)
-        self.asset_zoom.sliderReleased.connect(lambda: config.set_asset_thumb_size(self._asset_thumb))
-        _zrow.addWidget(self.asset_zoom, 1)
-        _pl.addLayout(_zrow)
+        self.asset_path_label = QtWidgets.QLabel("选择分类")
+        self.asset_path_label.setObjectName("assetPath")
+        _pl.addWidget(self.asset_path_label)
+        self._asset_thumb = 84
         self.asset_fs_list = AssetListWidget()
         self.asset_fs_list.setObjectName("assetGrid")  # 卡片边界
         self.asset_fs_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
+        self.asset_fs_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.asset_fs_list.setIconSize(QtCore.QSize(self._asset_thumb, self._asset_thumb))
         self.asset_fs_list.setGridSize(QtCore.QSize(self._asset_thumb + 16, self._asset_thumb + 16))  # 固定大格子：懒加载空 item 不缩格
         self.asset_fs_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
@@ -1590,6 +2113,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_list = QtWidgets.QListWidget()
         self.asset_list.setObjectName("assetGrid")
         self.asset_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
+        self.asset_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.asset_list.setIconSize(QtCore.QSize(72, 72))
         self.asset_list.setResizeMode(QtWidgets.QListWidget.ResizeMode.Adjust)
         self.asset_list.setMovement(QtWidgets.QListWidget.Movement.Static)
@@ -1844,6 +2368,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             # → 让"导入底图清空素材库""加入/删除素材"等可撤销（修审核 HIGH：撤销静默丢素材）。
             "assets": list(self.assets),
             "source_dpi": self.source_dpi, "source_name": self.source_name,  # 修审核 LOW：撤销回旧文档时 DPI/源名一致
+            "group_names": dict(self._group_names),
+            "group_seq": self._group_seq,
+            "collapsed": list(self._collapsed),
+            "selected_group": self._selected_group,
             # 参考线快照（创建/清除入历史 → Ctrl+Z 能恢复被拖出/清掉的参考线）
             "guides_v": list(self.view._guides_v), "guides_h": list(self.view._guides_h),
         }
@@ -1953,7 +2481,16 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._layer_uid = max(self._layer_uid, *uids)  # 新层 uid 不与恢复的撞
         idx = snap["active"]
         self.active = self.layers[idx] if 0 <= idx < len(self.layers) else (self.layers[-1] if self.layers else None)
-        self.selected_layers = [self.active] if self.active else []  # 重建层后旧选择集失效 → 收敛为 active
+        self._group_names = dict(snap.get("group_names", self._group_names))
+        self._group_seq = int(snap.get("group_seq", self._group_seq))
+        self._collapsed = set(snap.get("collapsed", []))
+        self._selected_group = snap.get("selected_group")
+        if self._selected_group and any(l.get("group") == self._selected_group for l in self.layers):
+            self.selected_layers = [l for l in self.layers if l.get("group") == self._selected_group and l.get("visible", True)]
+            self.active = self.selected_layers[-1] if self.selected_layers else self.active
+        else:
+            self._selected_group = None
+            self.selected_layers = [self.active] if self.active else []  # 重建层后旧选择集失效 → 收敛为 active
         self._active_guides = []  # 撤销/重做后清掉残留的智能参考线
         self.assets = list(snap.get("assets", []))  # 恢复素材库（引用）
         self.source_dpi = snap.get("source_dpi")
@@ -2277,15 +2814,12 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
     def _reorder_layer(self, src_uid, dst_uid, before: bool):
         # 拖拽排序回调（DragLayerList.dropEvent）：把 src 层移到 dst 层的显示「之前/之后」。
-        # MVP 限制（fail-loud）：只支持顶层栅格/文字/矢量层之间拖；带 group 的源/目标拒绝（不静默拖飞组成员）。
         by_uid = {l.get("uid"): l for l in self.layers}
         src = by_uid.get(src_uid); dst = by_uid.get(dst_uid)
         if src is None or dst is None or src is dst:
             return
-        if src.get("group") or dst.get("group"):
-            self.op_label.setText("组内 / 跨组拖拽暂不支持：请先「解组」，或用右键「上移/下移一层」")
-            return
         self._push_history("调整层级")  # 改动【前】入历史 → Ctrl+Z 复原顺序
+        src["group"] = dst.get("group")  # 拖到组成员附近=加入该组；拖到未分组层附近=脱离组
         # self.layers 是 底→顶（index 0=最底/最低 z）；面板倒序显示（顶层在上）。
         # 「显示中 src 在 dst 之前(上方)」= src 的 z 更高 = 在 self.layers 中排在 dst 之后(更大 index)。
         self.layers.remove(src)
@@ -2296,7 +2830,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             for it in self._layer_items(l):
                 it.setZValue(k)
         self._refresh_layers()  # active 不变（按 uid 持有），高亮随之重建
-        self.op_label.setText("拖拽调整层级")
+        self.op_label.setText("拖拽调整层级" + (" · 已加入组" if src.get("group") else ""))
 
     # _delete_specific_layer / _delete_active / _rename_layer 已抽到 editor_layers.LayersMixin。
 
@@ -2480,7 +3014,9 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._push_history("组显隐")
         for l in self.layers:
             if l.get("group") == gid:
-                l["visible"] = vis; l["item"].setVisible(vis)
+                l["visible"] = vis
+                for it in self._layer_items(l):
+                    it.setVisible(vis)
                 if not vis and l is self.active:
                     self.active = None
         self._update_outline(); self._refresh_layers()

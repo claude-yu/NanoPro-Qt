@@ -22,7 +22,11 @@ a = Analysis(
     datas=ads_datas + cert_datas + [(os.path.join("src", "models", "u2netp.onnx"), "models"),
                                     ("NanoPro.ico", ".")],  # 运行期 setWindowIcon 读 _MEIPASS/NanoPro.ico
     # certifi/onnxruntime 是惰性 import（PyInstaller 静态分析可能漏）→ 显式列出；cv2 同理
-    hiddenimports=["cv2", "certifi", "PySide6QtAds", "onnxruntime", "onnxruntime.capi._pybind_state"] + ads_hidden + cert_hidden,
+    hiddenimports=[
+        "cv2", "certifi", "PySide6QtAds", "onnxruntime", "onnxruntime.capi._pybind_state",
+        # 插件/工具面板是菜单懒加载，PyInstaller 静态分析可能漏掉。
+        "wb_analyzer", "wb_quant", "PIL.Image",
+    ] + ads_hidden + cert_hidden,
     hookspath=[],
     runtime_hooks=[],
     # 砍掉确定用不到的大块 Qt 模块，减体积、加快启动（QtSvg/QtSvgWidgets 要保留——矢量渲染在用）

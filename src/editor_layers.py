@@ -73,10 +73,13 @@ class LayersMixin:
                 shown_groups.add(gid)
                 members = [l for l in self.layers if l.get("group") == gid]
                 any_vis = any(l.get("visible", True) for l in members)
+                any_locked = any(l.get("locked", False) for l in members)
                 hdr = GroupHeaderRow(self, gid, self._group_names.get(gid, gid),
-                                     len(members), gid in self._collapsed, any_vis)
+                                     len(members), gid in self._collapsed, any_vis, any_locked,
+                                     getattr(self, "_selected_group", None) == gid)
                 hit = QtWidgets.QListWidgetItem(); hit.setSizeHint(hdr.sizeHint())
-                hit.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)  # 组头不可选
+                hit.setData(QtCore.Qt.ItemDataRole.UserRole, f"group:{gid}")
+                hit.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsDropEnabled)
                 self.layer_list.addItem(hit); self.layer_list.setItemWidget(hit, hdr)
             if gid and gid in self._collapsed:
                 continue  # 组折叠 → 不渲染成员行
@@ -148,6 +151,7 @@ class LayersMixin:
         # 图层面板 Ctrl/Shift 多选变化 → 填 selected_layers（过滤组头/隐藏层），currentItem 设为 active。
         if self._suspend_sel_sync:
             return
+        self._selected_group = None
         by_uid = {l.get("uid"): l for l in self.layers}
         sel = []
         for it in self.layer_list.selectedItems():
@@ -328,15 +332,29 @@ class LayersMixin:
         self._group_seq += 1
         gid = f"g{self._group_seq}"
         self._group_names[gid] = f"组 {self._group_seq}"
+        member_ids = {id(l) for l in members}
+        top_index = max(self.layers.index(l) for l in members)
+        block = [l for l in self.layers if id(l) in member_ids]
+        rest = [l for l in self.layers if id(l) not in member_ids]
+        insert_at = sum(1 for i, l in enumerate(self.layers) if i <= top_index and id(l) not in member_ids)
+        self.layers = rest[:insert_at] + block + rest[insert_at:]
         for l in members:
             l["group"] = gid
+        self._selected_group = gid
+        self.selected_layers = list(block)
         self._marked.clear()
+        for k, l in enumerate(self.layers):
+            for it in self._layer_items(l):
+                it.setZValue(k)
         self._refresh_layers()
+        self._reselect_rows_by_uid([l.get("uid") for l in block])
         self.op_label.setText(f"已打组：{len(members)} 个图层 → {self._group_names[gid]}")
 
     def do_ungroup(self):
         seed = self._marked_layers() or ([self.active] if self.active else [])
         gids = {l.get("group") for l in seed if l.get("group")}
+        if getattr(self, "_selected_group", None):
+            gids.add(self._selected_group)
         if not gids:
             QtWidgets.QMessageBox.information(self, "解组", "请勾选或选中一个组内的图层，再点「解组」")
             return
@@ -346,8 +364,135 @@ class LayersMixin:
             if l.get("group") in gids:
                 l["group"] = None; n += 1
         self._marked.clear()
+        if getattr(self, "_selected_group", None) in gids:
+            self._selected_group = None
         self._refresh_layers()
         self.op_label.setText(f"已解组：{n} 个图层")
+
+    def _group_members(self, gid: str):
+        return [l for l in self.layers if l.get("group") == gid]
+
+    def _select_group(self, gid: str):
+        members = [l for l in self._group_members(gid) if l.get("visible", True)]
+        self._selected_group = gid
+        self.selected_layers = members
+        self.active = members[-1] if members else None
+        self._clear_selection()
+        self._update_outline()
+        self._refresh_layers()
+        self._reselect_rows_by_uid([l.get("uid") for l in members])
+        self._sync_opacity_slider()
+        self.op_label.setText(f"已选中组：{self._group_names.get(gid, gid)}")
+
+    def _rename_group(self, gid: str):
+        name, ok = QtWidgets.QInputDialog.getText(self, "重命名组", "名称：", text=self._group_names.get(gid, gid))
+        if ok and name:
+            self._push_history("重命名组")
+            self._group_names[gid] = name
+            self._refresh_layers()
+
+    def _ungroup_gid(self, gid: str):
+        if not self._group_members(gid):
+            return
+        self._push_history("解组")
+        for l in self.layers:
+            if l.get("group") == gid:
+                l["group"] = None
+        self._collapsed.discard(gid)
+        self._group_names.pop(gid, None)
+        if self._selected_group == gid:
+            self._selected_group = None
+        self._refresh_layers()
+        self.op_label.setText("已解组（保留图层）")
+
+    def _delete_group(self, gid: str):
+        members = self._group_members(gid)
+        if not members:
+            return
+        self._push_history("删除组")
+        for l in members:
+            for it in self._layer_items(l):
+                self.scene.removeItem(it)
+        self.layers = [l for l in self.layers if l.get("group") != gid]
+        self._collapsed.discard(gid)
+        self._group_names.pop(gid, None)
+        self._marked = {u for u in self._marked if any(l.get("uid") == u for l in self.layers)}
+        if self._selected_group == gid:
+            self._selected_group = None
+        if self.active in members:
+            self.active = self.layers[-1] if self.layers else None
+            self.selected_layers = [self.active] if self.active else []
+        for k, l in enumerate(self.layers):
+            for it in self._layer_items(l):
+                it.setZValue(k)
+        self._update_outline()
+        self._refresh_layers()
+        self.op_label.setText(f"已删除组及内容：{len(members)} 个图层")
+
+    def _set_group_locked(self, gid: str, locked: bool):
+        members = self._group_members(gid)
+        if not members:
+            return
+        self._push_history("组锁定")
+        for l in members:
+            l["locked"] = locked
+            for it in self._layer_items(l):
+                it.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
+        self._update_outline()
+        self._refresh_layers()
+        self.op_label.setText(f"{self._group_names.get(gid, gid)} {'已锁定' if locked else '已解锁'}")
+
+    def _move_layer_to_group(self, src_uid, gid: str):
+        src = next((l for l in self.layers if l.get("uid") == src_uid), None)
+        if src is None or src.get("group") == gid:
+            return
+        members = [l for l in self.layers if l.get("group") == gid and l is not src]
+        if not members:
+            return
+        self._push_history("移入组")
+        self.layers.remove(src)
+        members = [l for l in self.layers if l.get("group") == gid]
+        insert_at = self.layers.index(members[-1]) + 1
+        src["group"] = gid
+        self.layers.insert(insert_at, src)
+        for k, l in enumerate(self.layers):
+            for it in self._layer_items(l):
+                it.setZValue(k)
+        self._selected_group = gid
+        self._refresh_layers()
+        self._reselect_rows_by_uid([l.get("uid") for l in self._group_members(gid)])
+        self.op_label.setText(f"已移入组：{self._group_names.get(gid, gid)}")
+
+    def _reorder_group(self, src_gid: str, dst_token, before: bool):
+        block = [l for l in self.layers if l.get("group") == src_gid]
+        if not block:
+            return
+        dst_gid = dst_token[6:] if isinstance(dst_token, str) and dst_token.startswith("group:") else None
+        if dst_gid == src_gid:
+            return
+        self._push_history("移动组")
+        block_ids = {id(l) for l in block}
+        rest = [l for l in self.layers if id(l) not in block_ids]
+        if dst_gid:
+            dst_members = [l for l in rest if l.get("group") == dst_gid]
+            if not dst_members:
+                return
+            idxs = [rest.index(l) for l in dst_members]
+            insert_at = max(idxs) + 1 if before else min(idxs)
+        else:
+            dst = next((l for l in rest if l.get("uid") == dst_token), None)
+            if dst is None:
+                return
+            di = rest.index(dst)
+            insert_at = di + 1 if before else di
+        self.layers = rest[:insert_at] + block + rest[insert_at:]
+        for k, l in enumerate(self.layers):
+            for it in self._layer_items(l):
+                it.setZValue(k)
+        self._selected_group = src_gid
+        self._refresh_layers()
+        self._reselect_rows_by_uid([l.get("uid") for l in block])
+        self.op_label.setText(f"已移动组：{self._group_names.get(src_gid, src_gid)}")
 
     def _toggle_collapse(self, gid: str):
         self._collapsed.discard(gid) if gid in self._collapsed else self._collapsed.add(gid)
@@ -362,6 +507,7 @@ class LayersMixin:
             if hasattr(self, "_vec_controls"):
                 self._set_vec_controls_enabled(False)
         self.active = layer
+        self._selected_group = None
         if layer not in self.selected_layers:  # 单选路径（画布点击/新建层）→ 选择集收敛为单层
             self.selected_layers = [layer] if layer else []
         self._text_live_pushed = False  # 换层 → 重置文字样式即时编辑的历史标记

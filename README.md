@@ -138,7 +138,7 @@ python -m PyInstaller NanoPro.spec --noconfirm
 
 ## 🧱 技术栈与结构
 
-PySide6 6.11 · NumPy · OpenCV · onnxruntime · PySide6-QtAds · lxml · certifi
+PySide6 6.11 · NumPy · OpenCV · Pillow · onnxruntime · PySide6-QtAds · lxml · certifi
 
 主类 `editor_window.py` 已按功能拆成 7 个 mixin（从 7096 行降到 ~3500 行，行为不变）：
 
@@ -153,6 +153,7 @@ src/
   editor_text.py      文字工具 + 画布内打字
   editor_export.py    导出 PNG/TIFF + 合成 + 工程读写
   editor_connectors.py 智能连接线（边中点锚点 + 跟随 + 形状切换）
+  wb_analyzer.py / wb_quant.py  Western blot 灰度定量（ImageJ 口径）
   canvas_view.py      QGraphicsView 画布交互
   connector_item.py   连接线图元（边中点几何 + 箭头）
   layer_item.py       图层项（含非破坏蒙版）
