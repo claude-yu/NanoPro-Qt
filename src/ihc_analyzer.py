@@ -278,7 +278,8 @@ class HistRangeSlider(QtWidgets.QWidget):
     def _x2v(self, x):
         x0, x1 = self._track()
         t = (x - x0) / max(1.0, (x1 - x0))
-        return int(round(self._vmin + t * (self._vmax - self._vmin)))
+        v = int(round(self._vmin + t * (self._vmax - self._vmin)))
+        return max(self._vmin, min(self._vmax, v))   # 夹取 [vmin,vmax]：手柄拖出轨道也不显示越界值
 
     def paintEvent(self, e):
         p = QtGui.QPainter(self)
@@ -917,8 +918,8 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         thr_txt = ("[%d,%d]" % (self._manual_lo, self._manual_thr)) if self._thr_mode == "manual" else ("Otsu≤%d" % self._cur_thr)
         cc = self._conc[idx]
         sub_cc = cc if rect is None else cc[rect[1]:rect[3], rect[0]:rect[2]]
-        mean_od = float(sub_cc[sel].mean()) if pos else 0.0
-        iod = float(sub_cc[sel].sum()) if pos else 0.0           # 积分光密度 = 阳性区 OD 总和 = 平均OD×阳性像素
+        mean_od = float(sub_cc[sel].mean()) if pos else None
+        iod = float(sub_cc[sel].sum()) if pos else None          # 积分光密度 = 阳性区 OD 总和；零阳性=未定义(None)，与批量 metrics_from 口径一致
         out = {**base, "measure": self._names[idx], "thr": thr_txt, "mean_od": mean_od, "iod": iod}
         if self._names[idx] == "DAB":
             ch8 = self._img8[idx]; sub8 = ch8 if rect is None else ch8[rect[1]:rect[3], rect[0]:rect[2]]
@@ -1044,7 +1045,7 @@ class _BatchWorker(QtCore.QObject):
 class IHCBatchDialog(QtWidgets.QDialog):
     """多图批量阳性面积%：统一设置一键跑 → 左列表 + 叠加预览审核 + 汇总表 + 组聚合(模型 vs 对照) + CSV。"""
 
-    COLS = ["#", "文件", "组", "测量", "阳性面积%", "平均OD", "IOD", "H-score", "IHC分", "分级", "阳性px", "组织px"]
+    COLS = ["#", "文件", "组", "测量", "阳性面积%", "阈值", "平均OD", "IOD", "H-score", "IHC分", "分级", "阳性px", "组织px"]
 
     def __init__(self, parent=None, init_stain="H DAB"):
         super().__init__(parent)
@@ -1164,6 +1165,8 @@ class IHCBatchDialog(QtWidgets.QDialog):
         self.view.maskStroke.connect(self._on_one_stroke)
         self.view.lassoStroke.connect(self._on_one_lasso)
         self.view.editBegan.connect(self._push_one_undo)
+        self.view.peekOriginal.connect(self._peek_one)        # 按住 C 看原图（与单图一致）
+        self.view.toggleView.connect(self._toggle_one_view)   # Tab 原图↔叠加（与单图一致）
         QtGui.QShortcut(QtGui.QKeySequence.StandardKey.Undo, self.view, activated=self._undo_one)
         mv.addWidget(self.view, 1)
         prow = QtWidgets.QHBoxLayout()
@@ -1291,7 +1294,7 @@ class IHCBatchDialog(QtWidgets.QDialog):
         act_remove = menu.addAction(icons.tool_icon("trash", c["danger"], 18), "从批量移除")
         chosen = menu.exec(self.lst.viewport().mapToGlobal(pos))
         if chosen is act_copy:
-            name = os.path.basename(str(self._paths[row])) if row < len(self._paths) else self.lst.item(row).text()
+            name = QtCore.QFileInfo(str(self._paths[row])).fileName() if row < len(self._paths) else self.lst.item(row).text()
             QtWidgets.QApplication.clipboard().setText(name)
         elif chosen is act_reset:
             self._reset_one()
@@ -1378,6 +1381,7 @@ class IHCBatchDialog(QtWidgets.QDialog):
     def _set_table_row(self, i, r):
         vals = [str(i + 1), r["name"], r["group"], r.get("target", ""),
                 ("%.3f" % r["area_pct"]) if r["ok"] else "失败",
+                r.get("thr_label") or "—",
                 "—" if r.get("mean_od") is None else "%.1f" % r["mean_od"],
                 "—" if r.get("iod") is None else "%.4g" % r["iod"],
                 "—" if r.get("h_score") is None else "%.0f" % r["h_score"],
@@ -1385,7 +1389,7 @@ class IHCBatchDialog(QtWidgets.QDialog):
                 str(r.get("pos_px", 0)), str(r.get("tissue_px", 0))]
         gc = self.COLS.index("分级")
         for c, v in enumerate(vals):
-            it = _table_item(v, numeric=(c not in (0, 1, 2, 3, gc)), key=(c == 4))
+            it = _table_item(v, numeric=(c not in (0, 1, 2, 3, 5, gc)), key=(c == 4))
             if c == gc and r.get("tier"):
                 it.setForeground(QtGui.QColor(_TIER_COLOR.get(r["tier"], "#6b7280")))
             self.table.setItem(i, c, it)
@@ -1457,14 +1461,33 @@ class IHCBatchDialog(QtWidgets.QDialog):
             except Exception:
                 pass
         self._cur = {"path": path, "rgb": rgb, "mask": pos.copy(), "tissue": tissue,
-                     "target": target, "cc": cc, "ch8": ch8, "is_dab": is_dab, "thr_label": thr_label}
-        self._undo1 = []
+                     "target": target, "cc": cc, "ch8": ch8, "is_dab": is_dab,
+                     "thr_label": thr_label, "sr_pre": None}   # sr_pre: 天狼星红 rgb2lab 预计算缓存(拖灵敏度复用)
+        self._undo1 = []; self._show_raw_one = False
         self.view.set_image(overlay_pixmap(rgb, pos))   # 适应窗口
 
     def _show_cur(self):
         if self._cur is None or self.view._pix_item is None:
             return
         self.view._pix_item.setPixmap(overlay_pixmap(self._cur["rgb"], self._cur["mask"]))
+        self.view.viewport().update()
+
+    def _peek_one(self, on):
+        """批量预览：按住 C 临时看原图，松开回叠加（与单图一致）。"""
+        c = self._cur
+        if c is None or self.view._pix_item is None:
+            return
+        self.view._pix_item.setPixmap(_rgb_to_pixmap(c["rgb"]) if on else overlay_pixmap(c["rgb"], c["mask"]))
+        self.view.viewport().update()
+
+    def _toggle_one_view(self):
+        """批量预览：Tab 在 原图↔叠加 间一键切换（与单图一致）。"""
+        c = self._cur
+        if c is None or self.view._pix_item is None:
+            return
+        self._show_raw_one = not getattr(self, "_show_raw_one", False)
+        self.view._pix_item.setPixmap(_rgb_to_pixmap(c["rgb"]) if self._show_raw_one
+                                      else overlay_pixmap(c["rgb"], c["mask"]))
         self.view.viewport().update()
 
     def _recompute_cur(self, thr_label=None):
@@ -1582,11 +1605,17 @@ class IHCBatchDialog(QtWidgets.QDialog):
             return
         path = c["path"]; s = self._eff_settings(path)
         try:
-            if c.get("ch8") is not None and s.get("thr_mode") == "manual":   # 用缓存通道，不重解卷积
+            if c.get("ch8") is not None and s.get("thr_mode") == "manual":   # deconv：用缓存通道，不重解卷积
                 lo = int(s.get("manual_lo", 0)); hi = int(s.get("manual_hi", 255))
                 c["mask"] = (c["ch8"] >= lo) & (c["ch8"] <= hi) & c["tissue"]
                 thr_label = "[%d,%d]" % (lo, hi)
-            else:                                                            # red / Otsu → 走 _compute
+            elif s.get("mode") == "red":                                     # 天狼星红：缓存 rgb2lab 预计算，拖灵敏度只施廉价阈值(不重算 rgb2lab，与单图 _sr_pre 一致)
+                if c.get("sr_pre") is None:
+                    c["sr_pre"] = iq.sirius_red_precompute(c["rgb"])
+                sm = int(s.get("sat_min", 50))
+                c["mask"] = iq.sirius_red_mask(c["sr_pre"], sm)["red_mask"].copy()
+                thr_label = "灵敏度%d" % sm
+            else:                                                            # Otsu → 走 _compute
                 res = ib._compute(c["rgb"], s)
                 c["mask"] = res[0].copy(); thr_label = res[3]
         except Exception:
