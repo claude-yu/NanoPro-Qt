@@ -28,6 +28,8 @@ a = Analysis(
         "cv2", "certifi", "PySide6QtAds", "onnxruntime", "onnxruntime.capi._pybind_state",
         # WB 灰度定量面板/模块是菜单懒加载，PyInstaller 静态分析可能漏掉。
         "wb_analyzer", "wb_quant", "gel_analyzer", "wb_batch", "PIL.Image",
+        # IHC 免疫组化定量（菜单懒加载，复刻 Fiji Colour Deconvolution；ihc_analyzer 复用 wb_analyzer.ROIView）。
+        "ihc_analyzer", "ihc_quant", "ihc_batch",
         # WB 凝胶分析依赖 scipy.signal（find_peaks/savgol，含 Cython 扩展）
         "scipy", "scipy.signal", "scipy.signal._peak_finding_utils", "scipy.signal._savitzky_golay",
     ] + ads_hidden + cert_hidden + scipy_hidden,

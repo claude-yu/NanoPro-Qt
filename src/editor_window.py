@@ -1783,6 +1783,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._plugins = [
             (icons.tool_icon("star", tc["text"], 16), "AI 生成 / 对话", "生成式 AI 绘图（文生图/图生图）+ AI 对话生成提示词（同一浮窗标签切换）", self._toggle_ai_panel),
             (icons.tool_icon("measure", tc["text"], 16), "WB 灰度定量分析…", "Western blot 条带灰度定量（对齐 ImageJ Gel Analyzer）：框泳道/带→IntDen/峰面积/归一化/导出CSV", self._toggle_wb_panel),
+            (icons.tool_icon("measure", tc["text"], 16), "IHC / 组织化学定量…", "免疫组化与组织化学染色定量（对齐 Fiji Colour Deconvolution，逐位一致）：DAB 分级/阳性面积% · 纤维化胶原(Masson Otsu / 天狼星红红色面积) · 导出CSV", self._toggle_ihc_panel),
         ]
         for icon, name, tip, cb in self._plugins:
             act = plug.addAction(icon, name, cb); act.setToolTip(tip)
@@ -1800,6 +1801,19 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._wb_window.set_content(WBAnalyzerPanel(self))
             self._wb_window.resize(1080, 680)
         w = self._wb_window
+        if w.isVisible():
+            w.hide()
+        else:
+            w.show(); w.raise_(); w.activateWindow()
+
+    def _toggle_ihc_panel(self):
+        # 开/关 IHC 免疫组化定量浮窗（插件菜单）。懒加载，关闭=隐藏保留状态。
+        if not hasattr(self, "_ihc_window"):
+            from ihc_analyzer import IHCAnalyzerPanel
+            self._ihc_window = FloatingToolWindow(self, "IHC / 组织化学定量", icons.tool_icon("star", "#c06a2a", 16))
+            self._ihc_window.set_content(IHCAnalyzerPanel(self))
+            self._ihc_window.resize(1320, 860)
+        w = self._ihc_window
         if w.isVisible():
             w.hide()
         else:

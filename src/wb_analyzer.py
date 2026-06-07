@@ -37,6 +37,71 @@ def _start_path(key: str, name: str = "") -> str:
 
 
 # ---------- 读图（ImageJ 口径）----------
+def _table_item(text, *, numeric: bool = False, key: bool = False, muted: bool = False) -> QtWidgets.QTableWidgetItem:
+    item = QtWidgets.QTableWidgetItem(str(text))
+    align = QtCore.Qt.AlignmentFlag.AlignVCenter
+    align |= QtCore.Qt.AlignmentFlag.AlignRight if numeric else QtCore.Qt.AlignmentFlag.AlignCenter
+    item.setTextAlignment(align)
+    if key:
+        f = item.font()
+        f.setBold(True)
+        item.setFont(f)
+    if muted:
+        item.setForeground(QtGui.QColor(theme.colors()["muted"]))
+    return item
+
+
+def _table_to_tsv(table: QtWidgets.QTableWidget, selected_only: bool = False) -> str:
+    if selected_only and table.selectedIndexes():
+        indexes = sorted(table.selectedIndexes(), key=lambda x: (x.row(), x.column()))
+        rows = sorted({i.row() for i in indexes})
+        cols = sorted({i.column() for i in indexes})
+        out = []
+        for r in rows:
+            out.append("\t".join((table.item(r, c).text() if table.item(r, c) else "") for c in cols))
+        return "\n".join(out)
+    headers = [table.horizontalHeaderItem(c).text() if table.horizontalHeaderItem(c) else "" for c in range(table.columnCount())]
+    out = ["\t".join(headers)] if headers else []
+    for r in range(table.rowCount()):
+        out.append("\t".join((table.item(r, c).text() if table.item(r, c) else "") for c in range(table.columnCount())))
+    return "\n".join(out)
+
+
+def _copy_table(table: QtWidgets.QTableWidget, selected_only: bool = False):
+    text = _table_to_tsv(table, selected_only)
+    if text:
+        QtWidgets.QApplication.clipboard().setText(text)
+
+
+def _show_table_menu(table: QtWidgets.QTableWidget, pos, export_cb=None):
+    menu = QtWidgets.QMenu(table)
+    c = theme.colors()
+    selected = bool(table.selectedIndexes())
+    act_sel = menu.addAction(icons.tool_icon("copy", c["text"], 18), "复制选中")
+    act_sel.setEnabled(selected)
+    act_all = menu.addAction(icons.tool_icon("copy", c["text"], 18), "复制整表")
+    if export_cb is not None:
+        menu.addSeparator()
+        act_export = menu.addAction("导出 CSV...")
+    else:
+        act_export = None
+    chosen = menu.exec(table.viewport().mapToGlobal(pos))
+    if chosen is act_sel:
+        _copy_table(table, True)
+    elif chosen is act_all:
+        _copy_table(table, False)
+    elif act_export is not None and chosen is act_export:
+        export_cb()
+
+
+def _setup_result_table(table: QtWidgets.QTableWidget, export_cb=None):
+    table.setAlternatingRowColors(True)
+    table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+    table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+    table.customContextMenuRequested.connect(lambda pos: _show_table_menu(table, pos, export_cb))
+
+
 def load_signal_and_pixmap(path, weighted: bool = False):
     """返回 (measure_array float 0-255, display_pixmap, polarity_auto)。ImageJ Image>Type>8-bit 同口径：
     调色板图=原始索引；16/32-bit 按显示范围(min→0,max→255)缩放；RGB→(R+G+B)/3 非加权(weighted=True 切加权)。"""
@@ -745,7 +810,12 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        _setup_result_table(self.table, self.export_csv)
         self.table.itemSelectionChanged.connect(self._on_table_sel)
+        self.empty_results = QtWidgets.QLabel("载入图像并测量后，结果会显示在这里。")
+        self.empty_results.setObjectName("analysisEmpty")
+        self.empty_results.setWordWrap(True)
+        rv.addWidget(self.empty_results)
         vsplit.addWidget(self.table)
         bottom = QtWidgets.QWidget(); bv = QtWidgets.QVBoxLayout(bottom)
         bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(6)
@@ -925,6 +995,11 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
         self.cb_ctrl.clear(); self.cb_ctrl.addItem("无", None)
         self.cb_ctrl.blockSignals(False)
         self.plot.set_profile([])
+        self._sync_empty_results()
+
+    def _sync_empty_results(self):
+        if hasattr(self, "empty_results"):
+            self.empty_results.setVisible(self.table.rowCount() == 0)
 
     def _on_rois_changed(self):
         """ROI 增/删/拖动/缩放后：凝胶模式→重画每泳道曲线；否则→框带测量。"""
@@ -1088,13 +1163,11 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
                          str(pk["width"]), "%.1f" % pk["peak_h"],
                          ("%.3f" % norms[row]) if not np.isnan(norms[row]) else "—"]
                 for col, txt in enumerate(cells):
-                    it = QtWidgets.QTableWidgetItem(txt)
-                    it.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    if col == 2:
-                        f = it.font(); f.setBold(True); it.setFont(f)
+                    it = _table_item(txt, numeric=True, key=(col == 2))
                     self.table.setItem(row, col, it)
         finally:
             self.table.blockSignals(False)
+        self._sync_empty_results()
         self._sync_control_combo()
         nlanes = len(self._gel_lanes) if self._gel_lanes else 0
         self.status.setText("凝胶分析 %d 泳道 / %d 峰 · 曲线上拖橙锚点调基线、拖绿线/双击/右键调分峰 · 框可拖动缩放 · 极性=%s"
@@ -1106,6 +1179,7 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
         self._gel_mode = False; self._gel_prof = None   # 普通框带/泳道测量 → 退出凝胶模式
         if self._signal is None or not self.view.rois:
             self.table.setRowCount(0); self._results = []
+            self._sync_empty_results()
             return
         sig = self._signal
         bg_mode = self.cb_bg.currentIndex()
@@ -1194,15 +1268,13 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
                          "%.0f" % (r["peak_area"] if self._method == "lane" else r["intden"]),
                          norm_txt]
                 for col, txt in enumerate(cells):
-                    it = QtWidgets.QTableWidgetItem(txt)
-                    it.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                    if col == 4:
-                        f = it.font(); f.setBold(True); it.setFont(f)
+                    it = _table_item(txt, numeric=(col > 0), key=(col == 4))
                     if is_m:
                         it.setForeground(QtGui.QColor("#e8913c"))
                     self.table.setItem(row, col, it)
         finally:
             self.table.blockSignals(False)
+        self._sync_empty_results()
         self._sync_control_combo()
         unit = "泳道峰面积" if self._method == "lane" else "框带 IntDen"
         bgname = ["无", "环形", "Rolling-ball"][self.cb_bg.currentIndex()]
@@ -1338,6 +1410,8 @@ class BatchDialog(QtWidgets.QDialog):
         # 左：图片列表
         self.lst = QtWidgets.QListWidget(); self.lst.setObjectName("wbBatchList")
         self.lst.setMinimumWidth(170); self.lst.currentRowChanged.connect(self._select_image)
+        self.lst.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.lst.customContextMenuRequested.connect(self._show_list_menu)
         split.addWidget(self.lst)
         # 中：预览（可编辑框）+ 单图控制
         mid = QtWidgets.QWidget(); mv = QtWidgets.QVBoxLayout(mid); mv.setContentsMargins(0, 0, 0, 0); mv.setSpacing(6)
@@ -1359,6 +1433,7 @@ class BatchDialog(QtWidgets.QDialog):
         self.table.setHorizontalHeaderLabels(["图片", "状态"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        _setup_result_table(self.table)
         self.table.itemSelectionChanged.connect(self._on_table_pick)
         split.addWidget(self.table)
         split.setSizes([190, 560, 330])
@@ -1376,7 +1451,71 @@ class BatchDialog(QtWidgets.QDialog):
             _remember_dir("wb", paths[0])
             self._paths = list(paths)
             self.b_run.setEnabled(True)
-            self.status.setText("已选 %d 张图，点「运行批量」逐张检测。" % len(paths))
+            self._preview_paths()
+            self.status.setText("已选 %d 张 —— 先点左列表逐张核对原图（看有没有载入失败/损坏），再点「运行批量」检测。" % len(paths))
+
+    def _show_list_menu(self, pos):
+        row = self.lst.indexAt(pos).row()
+        if row < 0:
+            return
+        self.lst.setCurrentRow(row)
+        menu = QtWidgets.QMenu(self.lst)
+        c = theme.colors()
+        act_copy = menu.addAction(icons.tool_icon("copy", c["text"], 18), "复制文件名")
+        act_redetect = menu.addAction("重检测此图")
+        act_redetect.setEnabled(0 <= row < len(self._items))
+        menu.addSeparator()
+        act_remove = menu.addAction(icons.tool_icon("trash", c["danger"], 18), "从批量移除")
+        chosen = menu.exec(self.lst.viewport().mapToGlobal(pos))
+        if chosen is act_copy:
+            name = os.path.basename(str(self._paths[row])) if row < len(self._paths) else self.lst.item(row).text()
+            QtWidgets.QApplication.clipboard().setText(name)
+        elif chosen is act_redetect:
+            self._redetect_current()
+        elif chosen is act_remove:
+            self._remove_current(row)
+
+    def _remove_current(self, row=None):
+        row = self.lst.currentRow() if row is None else row
+        if row < 0:
+            return
+        if row < len(self._paths):
+            self._paths.pop(row)
+        if row < len(self._items):
+            self._items.pop(row)
+        self._cur = -1
+        if self._items:
+            self._fill_list()
+            self._fill_table()
+        else:
+            self._preview_paths()
+        if self.lst.count():
+            self.lst.setCurrentRow(min(row, self.lst.count() - 1))
+        self.b_run.setEnabled(bool(self._paths))
+        self.b_long.setEnabled(bool(self._items))
+        self.b_wide.setEnabled(any(x["boxes"] for x in self._items))
+
+    def _preview_paths(self):
+        """选完图：列出文件名 + 预览原图供核对（尚未检测）。"""
+        self._items = []; self._cur = -1
+        self.lst.blockSignals(True); self.lst.clear()
+        for p in self._paths:
+            self.lst.addItem("○ 未检测  —  " + os.path.basename(str(p)))
+        self.lst.blockSignals(False)
+        self.table.setRowCount(0)
+        self.b_long.setEnabled(False); self.b_wide.setEnabled(False)
+        if self._paths:
+            self.lst.setCurrentRow(0)   # 触发 _select_image → 预览首张原图
+
+    def _preview_raw(self, path):
+        """未检测时：直接显示原图供核对（载入失败明确报错）。"""
+        self.sp_cur.setEnabled(False); self.b_redetect.setEnabled(False)
+        try:
+            _arr, pix, _pol = load_signal_and_pixmap(path)
+        except Exception as ex:
+            self.view.clear(); self.lbl_cur.setText("⚠ 打不开/已损坏：%s" % ex); return
+        self.view.set_image(pix); self.view.viewport().update()
+        self.lbl_cur.setText("原图核对（未检测）· %s" % os.path.basename(str(path)))
 
     # ---- 批量检测 ----
     def run(self):
@@ -1427,9 +1566,14 @@ class BatchDialog(QtWidgets.QDialog):
 
     # ---- 选中某张图 → 预览 ----
     def _select_image(self, idx):
-        if not (0 <= idx < len(self._items)):
+        if idx < 0:
+            return
+        if idx >= len(self._items):       # 还没运行批量 → 预览原图核对
+            if 0 <= idx < len(getattr(self, "_paths", [])):
+                self._cur = idx; self._preview_raw(self._paths[idx])
             return
         self._cur = idx; it = self._items[idx]
+        self.sp_cur.setEnabled(True); self.b_redetect.setEnabled(True)
         if it["pixmap"] is not None:
             self.view.set_image(it["pixmap"]); self.view.set_rois(it["boxes"]); self.view.sel = 0 if it["boxes"] else -1
         else:
@@ -1499,13 +1643,13 @@ class BatchDialog(QtWidgets.QDialog):
         for row, it in enumerate(self._items):
             self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(it["name"]))
             st = "✓ %d 带" % len(it["boxes"]) if it["ok"] else ("✗ " + it["error"])
-            cst = QtWidgets.QTableWidgetItem(st)
+            cst = _table_item(st)
             if not it["ok"]:
                 cst.setForeground(QtGui.QColor("#e8913c"))
             self.table.setItem(row, 1, cst)
             for i in range(maxb):
                 txt = "%.1f" % it["areas"][i] if i < len(it["areas"]) else ""
-                c = QtWidgets.QTableWidgetItem(txt); c.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                c = _table_item(txt, numeric=True, key=bool(txt))
                 self.table.setItem(row, 2 + i, c)
         # 列表带数同步刷新
         self._refresh_list_counts()

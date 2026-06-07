@@ -22,6 +22,7 @@ DARK = {
     "canvas_out": "#202020", "canvas_border": "#707070", "canvas_shadow": "#121212",
     "checker_a": "#c9c9c9", "checker_b": "#eeeeee", "smart_guide": "#d66bff",
     "measure": "#ff3b9d", "connector_anchor": "#3b82f6", "hud": "#86efac",
+    "ihc_accent": "#c06a2a",
 }
 LIGHT = {
     "window": "#c8c8c8", "panel": "#dedede", "base": "#eeeeee", "border": "#b7b7b7",
@@ -35,6 +36,7 @@ LIGHT = {
     "canvas_out": "#b0b0b0", "canvas_border": "#f6f6f6", "canvas_shadow": "#7a7a7a",
     "checker_a": "#bdbdbd", "checker_b": "#e8e8e8", "smart_guide": "#a020d0",
     "measure": "#db2777", "connector_anchor": "#2563eb", "hud": "#15803d",
+    "ihc_accent": "#a65f22",
 }
 
 _THEMES = {"dark": DARK, "light": LIGHT}
@@ -341,6 +343,15 @@ QTableWidget#wbTable QHeaderView::section {
   padding: 5px 6px;
   font-weight: 600;
 }
+QLabel#analysisEmpty {
+  background: @surface_sunken@;
+  color: @muted@;
+  border: 1px dashed @border@;
+  border-left: 3px solid @accent@;
+  border-radius: 2px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
 QWidget#wbPlot {
   background: @surface_sunken@;
   border: 1px solid @hairline@;
@@ -387,6 +398,136 @@ QListWidget#wbBatchList::item:hover {
 QListWidget#wbBatchList::item:selected {
   background: @row_active@;
   color: @text@;
+}
+
+/* —— IHC / HE / 组织化学定量：同一工作台语言，独立语义选择器 —— */
+QDialog#ihcBatchDialog { background: @window@; }
+QFrame#ihcTopBar, QFrame#ihcActionBar {
+  background: @surface_raised@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+}
+QLabel#ihcPanelTitle {
+  color: @text@;
+  font-weight: 700;
+  padding: 0 8px 0 2px;
+}
+QLabel#ihcFieldLabel {
+  color: @muted@;
+  font-size: 11px;
+  padding-left: 4px;
+}
+QToolButton#ihcToolButton {
+  background: @button@;
+  border: 1px solid @button_border@;
+  border-radius: 2px;
+  padding: 3px 6px;
+  min-width: 24px;
+  min-height: 23px;
+}
+QToolButton#ihcToolButton:hover {
+  background: @button_hover@;
+  border-color: @ihc_accent@;
+}
+QGraphicsView#ihcImageView {
+  background: @surface_sunken@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+}
+QFrame#ihcResultsPanel,
+QFrame#ihcPreviewPanel {
+  background: @panel@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+}
+QLabel#ihcSectionTitle {
+  color: @text@;
+  font-weight: 700;
+}
+QLabel#ihcTag {
+  background: @surface_sunken@;
+  color: @hint@;
+  border: 1px solid @hairline@;
+  border-left: 3px solid @ihc_accent@;
+  border-radius: 2px;
+  padding: 2px 7px;
+  font-size: 10px;
+}
+QLabel#ihcBannerInfo {
+  background: @surface_sunken@;
+  color: @text@;
+  border: 1px solid @hairline@;
+  border-left: 3px solid @ihc_accent@;
+  border-radius: 2px;
+  padding: 6px 8px;
+  font-size: 11px;
+}
+QTableWidget#ihcTable {
+  background: @surface_sunken@;
+  alternate-background-color: @panel@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+  gridline-color: @border@;
+  selection-background-color: @row_active@;
+  selection-color: @text@;
+  outline: none;
+}
+QTableWidget#ihcTable::item {
+  padding: 4px 6px;
+  border: none;
+}
+QTableWidget#ihcTable QHeaderView::section {
+  background: @surface_raised@;
+  color: @hint@;
+  border: none;
+  border-right: 1px solid @hairline@;
+  border-bottom: 1px solid @hairline@;
+  padding: 5px 6px;
+  font-weight: 600;
+}
+QLabel#ihcStatus {
+  background: @surface_sunken@;
+  color: @hint@;
+  border: 1px solid @hairline@;
+  border-left: 3px solid @ihc_accent@;
+  border-radius: 2px;
+  padding: 6px 9px;
+  font-size: 11px;
+}
+QSplitter#ihcSplit::handle {
+  background: @hairline@;
+}
+QSplitter#ihcSplit::handle:hover {
+  background: @ihc_accent@;
+}
+QListWidget#ihcBatchList {
+  background: @surface_sunken@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+  padding: 3px;
+  outline: none;
+}
+QListWidget#ihcBatchList::item {
+  min-height: 24px;
+  padding: 3px 6px;
+  border-radius: 2px;
+}
+QListWidget#ihcBatchList::item:hover {
+  background: @button_hover@;
+}
+QListWidget#ihcBatchList::item:selected {
+  background: @row_active@;
+  color: @text@;
+}
+QProgressBar#ihcProgress {
+  background: @surface_sunken@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+  min-height: 8px;
+}
+QProgressBar#ihcProgress::chunk {
+  background: @ihc_accent@;
+  border-radius: 1px;
 }
 
 /* —— AI 任务面板：任务行文字/状态不再用内联 style，主题切换一致 —— */

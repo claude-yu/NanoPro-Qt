@@ -46,3 +46,6 @@ ui_review/
 .idea/
 .DS_Store
 Thumbs.db
+
+# IHC 校准脚手架(可复现，不入库)；docs/ihc_alignment.md 是参考文档，照常提交。
+_ihc_calib/
