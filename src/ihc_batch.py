@@ -153,10 +153,12 @@ def analyze_path(path: str, s: dict) -> dict:
                 "ok": False, "error": str(ex)}
 
 
-def batch_analyze(paths, s: dict, progress=None) -> list:
+def batch_analyze(paths, s: dict, progress=None, should_cancel=None) -> list:
     out = []
     n = len(paths)
     for i, p in enumerate(paths):
+        if should_cancel and should_cancel():   # 协作取消：每张图边界检查，关窗时自然退出（不靠 terminate 硬杀）
+            break
         out.append(analyze_path(p, s))
         if progress:
             progress(i + 1, n)
