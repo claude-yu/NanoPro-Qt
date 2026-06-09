@@ -380,6 +380,14 @@ QSplitter#wbVSplit::handle:vertical {
 QSplitter#wbVSplit::handle:vertical:hover {
   background: @focus_ring@;
 }
+QSplitter#assetVSplit::handle:vertical {
+  background: @panel@;
+  border-top: 1px solid @hairline@;
+  border-bottom: 1px solid @hairline@;
+}
+QSplitter#assetVSplit::handle:vertical:hover {
+  background: @focus_ring@;
+}
 QListWidget#wbBatchList {
   background: @surface_sunken@;
   border: 1px solid @hairline@;

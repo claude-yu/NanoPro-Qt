@@ -1598,6 +1598,14 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if w is not None and w.isRunning():
             if not w.wait(3000):
                 w.terminate(); w.wait(1000)
+        # 退出前停 图像描摹 面板的常驻 QThread：面板装在 FloatingToolWindow 里，其 closeEvent 只 hide 不 close，
+        # 面板自身 closeEvent 永不触发 → 线程不停被销毁会硬崩（与 SegWorker 同坑，铁律③）。显式调 stop_thread。
+        tp = getattr(self, "_trace_panel", None)
+        if tp is not None and hasattr(tp, "stop_thread"):
+            tp.stop_thread()
+        ip = getattr(self, "_ihc_panel", None)   # IHC 单图面板的后台解卷积线程（同 FloatingToolWindow 子 widget closeEvent 不触发）
+        if ip is not None and hasattr(ip, "stop_threads"):
+            ip.stop_threads()
         super().closeEvent(e)
 
     def createPopupMenu(self):
@@ -1784,6 +1792,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             (icons.tool_icon("star", tc["text"], 16), "AI 生成 / 对话", "生成式 AI 绘图（文生图/图生图）+ AI 对话生成提示词（同一浮窗标签切换）", self._toggle_ai_panel),
             (icons.tool_icon("measure", tc["text"], 16), "WB 灰度定量分析…", "Western blot 条带灰度定量（对齐 ImageJ Gel Analyzer）：框泳道/带→IntDen/峰面积/归一化/导出CSV", self._toggle_wb_panel),
             (icons.tool_icon("measure", tc["text"], 16), "IHC / 组织化学定量…", "免疫组化与组织化学染色定量（对齐 Fiji Colour Deconvolution，逐位一致）：DAB 分级/阳性面积% · 纤维化胶原(Masson Otsu / 天狼星红红色面积) · 导出CSV", self._toggle_ihc_panel),
+            (icons.tool_icon("pen", tc["text"], 16), "图像描摹 / 矢量化…", "把位图(GPT/nano-banana 生成图)描摹成彩色矢量（对齐 Illustrator 图像描摹）：模式/颜色数/路径/边角/杂色/方法可调 + 实时预览，应用为可编辑矢量层，导出 SVG/PDF", self._toggle_trace_panel),
         ]
         for icon, name, tip, cb in self._plugins:
             act = plug.addAction(icon, name, cb); act.setToolTip(tip)
@@ -1811,9 +1820,24 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if not hasattr(self, "_ihc_window"):
             from ihc_analyzer import IHCAnalyzerPanel
             self._ihc_window = FloatingToolWindow(self, "IHC / 组织化学定量", icons.tool_icon("star", "#c06a2a", 16))
-            self._ihc_window.set_content(IHCAnalyzerPanel(self))
+            self._ihc_panel = IHCAnalyzerPanel(self)  # 留引用：退出时 closeEvent 停其后台解卷积线程
+            self._ihc_window.set_content(self._ihc_panel)
             self._ihc_window.resize(1320, 860)
         w = self._ihc_window
+        if w.isVisible():
+            w.hide()
+        else:
+            w.show(); w.raise_(); w.activateWindow()
+
+    def _toggle_trace_panel(self):
+        # 开/关 图像描摹/矢量化 浮窗（插件菜单）。懒加载，关闭=隐藏保留状态。
+        if not hasattr(self, "_trace_window"):
+            from image_trace_panel import ImageTracePanel
+            self._trace_window = FloatingToolWindow(self, "图像描摹 / 矢量化", icons.tool_icon("star", "#3a6ea5", 16))
+            self._trace_panel = ImageTracePanel(self)  # 留引用：退出时 closeEvent 停其常驻线程
+            self._trace_window.set_content(self._trace_panel)
+            self._trace_window.resize(940, 660)
+        w = self._trace_window
         if w.isVisible():
             w.hide()
         else:
@@ -2605,11 +2629,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_tree.setUniformRowHeights(True)
         self.asset_tree.setAnimated(True)
         self.asset_tree.setIndentation(14)
-        self.asset_tree.setMinimumHeight(180)
-        self.asset_tree.setMaximumHeight(320)
+        self.asset_tree.setMinimumHeight(80)  # 进竖向 splitter：可拖大也可拖小，去掉旧的 320 最大高度上限
         self.asset_tree.setToolTip("素材分类树。点语义分类直接看素材；物理分批目录已隐藏，缩略图按可见区域懒加载。")
         self.asset_tree.itemClicked.connect(self._on_asset_tree_click)
-        _lc.addWidget(self.asset_tree)
+        # asset_tree / (asset_header+asset_fs_list) / asset_preview_card 三段稍后装进竖向 splitter（见下）
         self.asset_header = QtWidgets.QFrame()
         self.asset_header.setObjectName("assetHeader")
         _ah = QtWidgets.QHBoxLayout(self.asset_header)
@@ -2621,7 +2644,6 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_fs_count.setObjectName("countBadge")
         _ah.addWidget(self.asset_path_label, 1)
         _ah.addWidget(self.asset_fs_count, 0, QtCore.Qt.AlignmentFlag.AlignRight)
-        _lc.addWidget(self.asset_header)
         self._asset_thumb = 104
         self.asset_fs_list = AssetListWidget()
         self.asset_fs_list.setObjectName("assetGrid")  # 卡片边界
@@ -2646,7 +2668,6 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._thumb_timer = QtCore.QTimer(self); self._thumb_timer.setSingleShot(True); self._thumb_timer.setInterval(60)
         self._thumb_timer.timeout.connect(self._lazy_decode_asset_thumbs)  # 滚动去抖 → 只解码可见缩略图
         self.asset_fs_list.verticalScrollBar().valueChanged.connect(lambda *_: self._thumb_timer.start())
-        _lc.addWidget(self.asset_fs_list, 1)
         self.asset_preview_card = QtWidgets.QFrame()
         self.asset_preview_card.setObjectName("assetPreview")
         _pv = QtWidgets.QVBoxLayout(self.asset_preview_card)
@@ -2710,7 +2731,23 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             _pv_actions.addWidget(_pv_btn)
         _pv_bottom.addLayout(_pv_actions)
         _pv.addLayout(_pv_bottom)
-        _lc.addWidget(self.asset_preview_card)
+        # —— 三段竖向 splitter：① 分类树 ② 路径头+缩略图网格 ③ 预览卡；拖段间分隔线即可调各区高度 ——
+        self.asset_vsplit = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.asset_vsplit.setObjectName("assetVSplit")
+        self.asset_vsplit.setChildrenCollapsible(False)  # 三段都不可拖没，避免误把某区拖到 0 不见
+        self.asset_vsplit.setHandleWidth(10)             # 加宽拖柄便于抓取（同 WB 竖 splitter）
+        _asset_mid = QtWidgets.QWidget()                 # 中段=路径头+网格 合成一个 splitter 子项
+        _aml = QtWidgets.QVBoxLayout(_asset_mid); _aml.setContentsMargins(0, 0, 0, 0); _aml.setSpacing(6)
+        _aml.addWidget(self.asset_header)
+        _aml.addWidget(self.asset_fs_list, 1)
+        self.asset_vsplit.addWidget(self.asset_tree)
+        self.asset_vsplit.addWidget(_asset_mid)
+        self.asset_vsplit.addWidget(self.asset_preview_card)
+        self.asset_vsplit.setStretchFactor(0, 0)         # 面板整体变高时，多出的高度给中段网格
+        self.asset_vsplit.setStretchFactor(1, 1)
+        self.asset_vsplit.setStretchFactor(2, 0)
+        self.asset_vsplit.setSizes([200, 520, 250])      # 初始高度比例≈旧固定布局观感
+        _lc.addWidget(self.asset_vsplit, 1)
         _lc.addWidget(self._hint("单击放画布中央 · 拖动精确放置 · 右键更多操作"))
         self._asset_groups = []
         self.asset_stack.addWidget(_page_local)
