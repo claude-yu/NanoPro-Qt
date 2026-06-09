@@ -15,13 +15,20 @@ scipy_datas, scipy_bins, scipy_hidden = collect_all("scipy")
 # 只拿 onnxruntime 的原生推理 dll；【绝不】用 collect_all——它会把 onnxruntime.training/transformers 等
 # 可选子模块当 hidden import 拖进来，进而把 torch + 整套 CUDA(几个 GB) 打进包。CPU 纯推理用不到 torch。
 ort_bins = collect_dynamic_libs("onnxruntime")
+# 图像描摹/矢量化：vtracer 是 Rust PyO3 原生扩展（vtracer.cpXX-win_amd64.pyd），__init__ 从 .vtracer 子模块导入实现。
+# collect_all 一并拿 .pyd + dist-info(含 MIT LICENSE，顺带满足分发声明)；不收则冻结包 import vtracer 失败 → 静默永久降级自研引擎。
+# vtracer wheel 仅 cp310–314 win_amd64：构建解释器越界会让 collect_all 抛隐晦异常 → 显式断言成 fail-loud 报错。
+import sys as _sys
+assert (3, 10) <= _sys.version_info[:2] <= (3, 14), \
+    f"vtracer wheel 仅支持 Python 3.10–3.14（cp310-314 win_amd64），当前 {_sys.version}"
+vtracer_datas, vtracer_bins, vtracer_hidden = collect_all("vtracer")
 
 a = Analysis(
     [os.path.join("src", "main.py")],
     pathex=[SRC],
-    binaries=ads_bins + cert_bins + ort_bins + scipy_bins,
+    binaries=ads_bins + cert_bins + ort_bins + scipy_bins + vtracer_bins,
     # 内置抠图模型 u2netp.onnx → 打到 _MEIPASS/models/（seg_client._local_model_path 读它）
-    datas=ads_datas + cert_datas + scipy_datas + [(os.path.join("src", "models", "u2netp.onnx"), "models"),
+    datas=ads_datas + cert_datas + scipy_datas + vtracer_datas + [(os.path.join("src", "models", "u2netp.onnx"), "models"),
                                                   ("NanoPro.ico", ".")],  # 运行期 setWindowIcon 读 _MEIPASS/NanoPro.ico
     # certifi/onnxruntime 是惰性 import（PyInstaller 静态分析可能漏）→ 显式列出；cv2 同理
     hiddenimports=[
@@ -30,9 +37,11 @@ a = Analysis(
         "wb_analyzer", "wb_quant", "gel_analyzer", "wb_batch", "PIL.Image",
         # IHC 免疫组化定量（菜单懒加载，复刻 Fiji Colour Deconvolution；ihc_analyzer 复用 wb_analyzer.ROIView）。
         "ihc_analyzer", "ihc_quant", "ihc_batch",
+        # 图像描摹/矢量化（菜单懒加载 from image_trace_panel import；vtracer .pyd 子模块静态分析可能漏）。
+        "image_trace_panel", "image_trace", "vtracer", "vtracer.vtracer",
         # WB 凝胶分析依赖 scipy.signal（find_peaks/savgol，含 Cython 扩展）
         "scipy", "scipy.signal", "scipy.signal._peak_finding_utils", "scipy.signal._savitzky_golay",
-    ] + ads_hidden + cert_hidden + scipy_hidden,
+    ] + ads_hidden + cert_hidden + scipy_hidden + vtracer_hidden,
     hookspath=[],
     runtime_hooks=[],
     # 砍掉确定用不到的大块 Qt 模块，减体积、加快启动（QtSvg/QtSvgWidgets 要保留——矢量渲染在用）
