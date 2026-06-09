@@ -334,6 +334,150 @@ def channel_positive_area(channel8: np.ndarray, tissue: "np.ndarray | None" = No
     return {"threshold": int(thr), "area_frac": pos_px / total, "pos_px": pos_px, "total_px": total, "mean_od": mod}
 
 
+def count_cells(mask, min_area: int = 20, max_area: int = 100000,
+                split: bool = True, peak_min_dist: int = 5,
+                min_circularity: float = 0.0, exclude_edges: bool = False) -> dict:
+    """对二值阳性掩膜计数细胞/核（对齐 Fiji「Binary>Watershed + Analyze Particles」，纯 cv2+scipy，不依赖 skimage）。
+
+    mask：bool/uint8 (H,W) 阳性选区。split=True → 距离变换+分水岭分开粘连核（Ki67/CD31 核常粘连）。
+    min_area/max_area：粒子面积过滤（对齐 Analyze Particles 的 Size 过滤）。
+    min_circularity：圆度过滤 [0,1]，逐位对齐 ImageJ `圆度=4π×面积/周长²`(封顶1.0)，剔细长非核伪影(血管壁/拖尾/碎片)。0=不过滤。
+    exclude_edges：剔除贴图像边的不完整核（对齐 Analyze Particles 的 Exclude on edges）。
+    peak_min_dist：分裂粒度≈最小核半径（距离变换局部极大值的最小间隔）。
+    返回 {count, centroids:[(x,y)], areas:[int], labels: int32 (H,W)}。fail-loud：空掩膜返回 count=0。
+    """
+    import cv2
+    import scipy.ndimage as ndi
+    m = (np.asarray(mask) > 0).astype(np.uint8)
+    H, W = m.shape[:2]
+    empty = {"count": 0, "centroids": [], "areas": [], "labels": np.zeros((H, W), np.int32)}
+    if m.sum() == 0:
+        return empty
+    # 不做形态学开运算：3x3 椭圆核退化为十字，会先腐蚀掉 <9px 的真核（高倍 Ki67/CD31 微核）。
+    # 去噪交给分水岭后的 min_area 面积过滤（按面积精确剔除，不会误伤小核）。
+
+    if split:
+        dist = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+        # 防过分割（一核多标）：① 高斯平滑距离图——抹掉离散等值平台与边缘毛刺产生的杂散等高极大；
+        # ② prominence/h-maxima 门槛——只认比 size 邻域谷底(grey_erosion)高出 h 的峰，合并同核内矮次峰。
+        # 对齐 ImageJ「Find Maxima / Binary>Watershed」的 noise tolerance(EDM MAXFINDER_TOLERANCE) 语义；
+        # h、sigma 都随「核大小」peak_min_dist 走（用户调大核大小→更不易把一个核拆开）。纯 scipy，零新依赖。
+        dist = ndi.gaussian_filter(dist, sigma=max(1.0, peak_min_dist * 0.5))
+        size = max(3, int(peak_min_dist) * 2 + 1)
+        mxf = ndi.maximum_filter(dist, size=size)
+        h = max(1.0, peak_min_dist * 0.6)
+        peaks = (dist >= mxf - 1e-6) & (dist >= ndi.grey_erosion(dist, size=size) + h) & (dist >= 1.0)
+        # 近距种子合并：把相距 < peak_min_dist 的杂散峰膨胀连成一团 → 一个核只出一个种子（治不规则大团块过分割）。
+        # 核大小(peak_min_dist) 越大合并越狠；真粘连核中心距 > 核大小则仍分开，靠用户把核大小设成实际核尺度。
+        if peak_min_dist >= 2:
+            peaks = ndi.binary_dilation(peaks, iterations=max(1, int(peak_min_dist * 0.5)))
+        seeds, nseed = ndi.label(peaks)
+        if nseed <= 1:                               # 无可分裂种子 → 直接连通域标记
+            labels, n = ndi.label(m)
+        else:
+            sure_fg = (seeds > 0).astype(np.uint8)
+            sure_bg = cv2.dilate(m, np.ones((3, 3), np.uint8), iterations=3)
+            unknown = (sure_bg.astype(np.int16) - sure_fg.astype(np.int16)) == 1
+            markers = seeds.astype(np.int32) + 1     # 0 留给 unknown；bg/种子从 1 起
+            markers[unknown] = 0
+            img3 = cv2.cvtColor(m * 255, cv2.COLOR_GRAY2BGR)
+            cv2.watershed(img3, markers)             # 边界=-1，bg=1，核=种子+1
+            labels = np.where(markers > 1, markers - 1, 0).astype(np.int32)
+            labels[m == 0] = 0
+            n = int(labels.max())
+    else:
+        labels, n = ndi.label(m)
+
+    # 面积过滤 + 质心（对齐 Analyze Particles）
+    centroids, areas = [], []
+    out = np.zeros_like(labels, np.int32)
+    if n > 0:
+        objs = ndi.find_objects(labels)
+        new_id = 0
+        for i, sl in enumerate(objs, start=1):
+            if sl is None:
+                continue
+            comp = labels[sl] == i
+            a = int(comp.sum())
+            if a < min_area or a > max_area:
+                continue
+            if exclude_edges and (sl[0].start == 0 or sl[1].start == 0
+                                  or sl[0].stop == H or sl[1].stop == W):
+                continue                                  # 贴图像边的不完整核（Exclude on edges）
+            if min_circularity > 0.0:                     # 圆度过滤：4π·面积/周长²（对齐 ImageJ Analyze Particles）
+                cnts, _ = cv2.findContours(comp.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                c0 = max(cnts, key=cv2.contourArea) if cnts else None   # 取最大外轮廓(防对角相接被拆成碎片误配)
+                peri = max(cv2.arcLength(c0, True), 1e-6) if c0 is not None else 1e-6
+                circ = min(1.0, 4.0 * np.pi * a / (peri * peri))   # 封顶 1.0（数字化误差可 >1）
+                if circ < min_circularity:
+                    continue
+            new_id += 1
+            ys, xs = np.where(comp)
+            cx = float(xs.mean()) + sl[1].start
+            cy = float(ys.mean()) + sl[0].start
+            centroids.append((cx, cy)); areas.append(a)
+            out[sl][comp] = new_id
+    return {"count": len(areas), "centroids": centroids, "areas": areas, "labels": out}
+
+
+def classify_nuclei(hema8, tissue, pos_mask, **count_kwargs) -> dict:
+    """苏木素逐核判正负（病理 LI 金标准）：在苏木素复染通道数【所有核】(单核比融合 DAB+ 团块好切)，
+    每核按其区域内 DAB 阳性像素占比 >50% 判阳性 → 阳性核/总核/LI 同口径(都来自苏木素单核分割)。
+
+    hema8=苏木素 8-bit(暗=强,核=低值)；tissue=组织掩膜；pos_mask=DAB 阳性选区。
+    返回 {total,positive,negative,li,pos_centroids,neg_centroids}。total=0 → li=None。
+    坑：苏木素 Otsu 在强 DAB+ 区被 DAB 压暗→核可能漏分→强阳组织 LI 偏低（可手动补核）。
+    """
+    h = np.asarray(hema8); t = np.asarray(tissue, bool); pm = np.asarray(pos_mask, bool)
+    out = {"total": 0, "positive": 0, "negative": 0, "li": None, "pos_centroids": [], "neg_centroids": []}
+    if not t.any():
+        return out
+    hthr = otsu_threshold(h[t])
+    nuclei = ((h <= hthr) & t) | pm                           # 所有核 = 苏木素核 ∪ DAB 阳性核
+    # （DAB+ 强阳性核常盖住自身苏木素复染→只数苏木素会漏掉阳性核，故并入 pos_mask，与路线B总核口径一致）
+    r = count_cells(nuclei, **count_kwargs)
+    labels = r["labels"]
+    import scipy.ndimage as ndi
+    objs = ndi.find_objects(labels)
+    pos_c, neg_c = [], []
+    for i, sl in enumerate(objs, start=1):
+        if sl is None:
+            continue
+        comp = labels[sl] == i
+        a = int(comp.sum())
+        if a == 0:
+            continue
+        frac = float((pm[sl] & comp).sum()) / a              # 该核内 DAB 阳性占比
+        ys, xs = np.where(comp)
+        cen = (float(xs.mean()) + sl[1].start, float(ys.mean()) + sl[0].start)
+        (pos_c if frac > 0.5 else neg_c).append(cen)
+    total = len(pos_c) + len(neg_c)
+    out.update(total=total, positive=len(pos_c), negative=len(neg_c),
+               pos_centroids=pos_c, neg_centroids=neg_c,
+               li=(len(pos_c) / total * 100.0) if total else None)
+    return out
+
+
+def estimate_nucleus_size(mask) -> int:
+    """从阳性掩膜估计「核大小」初值（=核内最大内切半径，正是 count_cells 的 peak_min_dist 语义）。
+
+    距离变换局部极大值 = 各核中心的内切半径，取中位数（抗强阳大团块高估）。空/无核兜底 8。
+    供 UI「自动」按钮：用户不必盲猜核尺度，给个合理初值再微调。
+    """
+    import cv2
+    import scipy.ndimage as ndi
+    m = (np.asarray(mask) > 0).astype(np.uint8)
+    if m.sum() == 0:
+        return 8
+    dist = cv2.distanceTransform(m, cv2.DIST_L2, 5)
+    mxf = ndi.maximum_filter(dist, size=5)
+    peaks = (dist >= mxf - 1e-6) & (dist >= 2.0)        # 半径≥2px 的核内峰
+    radii = dist[peaks]
+    if radii.size == 0:
+        return 8
+    return int(round(float(np.median(radii))))
+
+
 def _rgb_to_hsv(rgb_u8: np.ndarray):
     """向量化 RGB(uint8) → (H 0-360, S 0-1, V 0-1)。"""
     a = np.asarray(rgb_u8)[..., :3].astype(np.float32) / 255.0

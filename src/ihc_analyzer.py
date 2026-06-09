@@ -38,11 +38,34 @@ _OVERLAY_COLORS = {"亮绿": (60, 255, 90), "青": (0, 220, 255), "品红": (255
                    "黄": (255, 230, 0), "红": (255, 45, 45), "蓝": (40, 120, 255)}
 
 
-def load_rgb_and_pixmap(path):
-    """读图 → (rgb uint8 HxWx3, display QPixmap)。解卷积需要原始 RGB。"""
+def _decode_rgb(path) -> np.ndarray:
+    """解码图片 → RGB uint8 (H,W,3)。**纯 numpy，可在后台线程跑**（大 TIF 解码+16bit重标定移出主线程）。
+
+    高位深 TIF（16/32-bit，含 I;16B/L/N 大小端，扫描仪常见）按 dtype 判定 → min→0/max→255 缩放到 8-bit，
+    避免 convert('RGB') 把 >255 钳成全白。**用 float32(非float64,内存/时间减半)；只对浮点 dtype 做 isfinite(整数无 NaN/inf,跳过省一遍全图)。**
+    """
     from PIL import Image
-    im = Image.open(path).convert("RGB")
-    arr = np.ascontiguousarray(np.asarray(im, dtype=np.uint8))
+    im = Image.open(path)
+    raw = np.asarray(im)
+    if raw.dtype != np.uint8 or im.mode.startswith("I") or im.mode == "F":
+        r = raw.astype(np.float32)                          # float32 足够 8-bit 输出精度，省一半内存/时间
+        if np.issubdtype(raw.dtype, np.floating):           # 仅浮点图可能含 NaN/inf；整数 16-bit 跳过
+            finite = np.isfinite(r)
+            if not finite.all():
+                print("[ihc load] 警告：浮点图含 %d 个非有限像素(NaN/inf)，已置 0 处理" % int((~finite).sum()))
+                r = np.where(finite, r, np.float32(0))
+        mn, mx = float(r.min()), float(r.max())
+        scaled = (np.clip((r - mn) * (255.0 / (mx - mn)), 0, 255).astype(np.uint8)
+                  if mx > mn else np.zeros(r.shape, np.uint8))
+        arr = np.repeat(scaled[..., None], 3, axis=2) if scaled.ndim == 2 else scaled[..., :3]
+    else:
+        arr = np.asarray(im.convert("RGB"), dtype=np.uint8)
+    return np.ascontiguousarray(arr)
+
+
+def load_rgb_and_pixmap(path):
+    """读图 → (rgb uint8 HxWx3, display QPixmap)。兼容旧接口；新载图路径走 _decode_rgb 后台解码。"""
+    arr = _decode_rgb(path)
     return arr, _rgb_to_pixmap(arr)
 
 
@@ -118,10 +141,11 @@ class MaskEditView(ROIView):
     editBegan = QtCore.Signal()                            # 一次编辑操作开始 → 上层存撤销快照
     peekOriginal = QtCore.Signal(bool)                     # 按住 C = 闪烁看原图（True 按下/False 松开）
     toggleView = QtCore.Signal()                           # Tab = 在原图↔叠加间来回切换
+    cellClick = QtCore.Signal(int, int, bool)              # 加/减核：x, y, 左键(True=加核/False=删核)
 
     def __init__(self):
         super().__init__()
-        self.tool = "brush"           # roi / brush / lasso
+        self.tool = "brush"           # roi / brush / lasso / count
         self.brush_radius = 14
         self._painting = False
         self._add = True
@@ -134,7 +158,8 @@ class MaskEditView(ROIView):
         return self.tool in ("brush", "lasso")
 
     def _edit_cursor(self):
-        return QtCore.Qt.CursorShape.CrossCursor if self._is_edit() else QtCore.Qt.CursorShape.ArrowCursor
+        return (QtCore.Qt.CursorShape.CrossCursor
+                if (self._is_edit() or self.tool == "count") else QtCore.Qt.CursorShape.ArrowCursor)
 
     def event(self, e):
         # Tab 默认用于控件焦点切换 → 在 event 层截获，做"原图↔叠加"一键切换
@@ -185,6 +210,12 @@ class MaskEditView(ROIView):
         if self._space_pan:                                  # 平移交给 QGraphicsView(跳过 ROIView 画框)
             return super(ROIView, self).mousePressEvent(e)
         if self.tool == "browse":                            # 浏览：不画框不编辑（滚轮缩放/拖滚动条平移）
+            return
+        if self.tool == "count" and self._pix_item is not None and \
+                e.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
+            sp = self.mapToScene(e.position().toPoint())     # 加/减核：左键补漏数核、右键删错点（Cell Counter 式）
+            self.cellClick.emit(int(round(sp.x())), int(round(sp.y())),
+                                e.button() == QtCore.Qt.MouseButton.LeftButton)
             return
         if self._is_edit() and self._pix_item is not None and \
                 e.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
@@ -326,15 +357,63 @@ class HistRangeSlider(QtWidgets.QWidget):
         self.update(); self.rangeChanged.emit(self._lo, self._hi)
 
 
+class _DeconvWorker(QtCore.QObject):
+    """后台跑【解码大TIF + 16bit重标定 + colour_deconvolution / 天狼星红 rgb2lab】，主线程不冻结。
+
+    source: ('path', 路径) 解码 / ('qimg', QImage) 当前图层转换 / ('rgb', 数组) 已有数组。
+    结果带 token 防过期回调覆盖新图。全在非 GUI 线程：QImage/numpy 可跨线程，不建 QPixmap(主线程 done 才建)。
+    """
+    done = QtCore.Signal(object)   # dict: token/ok/mode/rgb/conc/img8/sr_pre/error
+
+    def __init__(self):
+        super().__init__(); self._job = None
+
+    def set_job(self, source, mode, stain, token):
+        self._job = (source, mode, stain, token)
+
+    @QtCore.Slot()
+    def run(self):
+        job, self._job = self._job, None   # 取走即清空：防两次 trigger 都读到同一新 job(旧 job 漏跑/新 job 跑两遍)
+        if job is None:
+            return
+        source, mode, stain, token = job
+        res = {"token": token, "mode": mode}
+        try:
+            kind, val = source
+            if kind == "path":
+                rgb = _decode_rgb(val)                       # 解码+16bit重标定（大TIF的卡顿主因，移到后台）
+            elif kind == "qimg":
+                q = val.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+                w, h = q.width(), q.height()
+                rgb = np.ascontiguousarray(np.frombuffer(q.constBits(), np.uint8).reshape(h, w, 4)[..., :3])
+            else:
+                rgb = val
+            res["rgb"] = rgb
+            if mode == "red":
+                res["sr_pre"] = iq.sirius_red_precompute(rgb)   # rgb2lab 很贵（~3s/4k）
+            else:
+                res["conc"], res["img8"] = iq.colour_deconvolution(rgb, stain)   # ~1.3s/4k
+            res["ok"] = True
+        except Exception as e:  # noqa: BLE001 —— 失败上浮到 UI，不静默
+            res["ok"] = False; res["error"] = str(e)
+        self.done.emit(res)
+
+
 class IHCAnalyzerPanel(QtWidgets.QWidget):
     """单图 IHC / 组织化学定量。"""
 
-    COLS = ["#", "测量", "阳性面积%", "阈值", "平均OD", "IOD", "H-score", "IHC分(0-4)", "分级", "阳性px", "组织px"]
+    COLS = ["#", "测量", "阳性面积%", "阳性细胞数", "总核数", "阳性率%", "阈值", "平均OD", "IOD", "H-score", "IHC分(0-4)", "分级", "阳性px", "组织px"]
+    _PROXY_MAX = 1500            # 大图交互预览的代理长边（拖阈值在代理上算，停手用全分辨率精算）
+    _deconv_trigger = QtCore.Signal()   # 跨线程触发 deconv worker.run
 
     def __init__(self, editor=None):
         super().__init__()
         self.editor = editor
         self._rgb = None            # 原始 RGB uint8 (H,W,3)
+        # 大图性能：解卷积后台线程 + 下采样预览代理
+        self._proxy_rgb = None; self._proxy_img8 = None; self._proxy_tissue = None
+        self._proxy_sr_pre = None; self._proxy_scale = 1.0
+        self._deconv_thread = None; self._deconv_worker = None; self._deconv_token = 0
         self._conc = None           # 解卷积浓度 (3,H,W) float
         self._img8 = None           # 解卷积 8-bit (3,H,W)（暗=强）
         self._stain = "H DAB"
@@ -355,6 +434,19 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         self._tissue = None         # 组织掩膜 (H,W) bool
         self._pos_mask = None       # 当前阳性选区 (H,W) bool（自动阈值得来，可手动修正）
         self._mask_edited = False   # 用户是否手动改过选区（改过则参数不变时不重建）
+        self._count_on = False      # 阳性细胞计数（CD31/Ki67 数个数）
+        self._cell_size = 8         # 核大小(px)≈分裂粒度，越大越不易把粘连核拆过头
+        self._cell_circ = 0.0       # 圆度过滤 [0,1]（0=不过滤；剔细长非核伪影，对齐 Analyze Particles）
+        self._li_on = False         # 算阳性率%(标记指数 LI=阳性核/总核)，核标记(Ki67/ER/PR)金标准读数
+        self._count_mode = "blob"   # 计数口径：blob=DAB+团块直接数(默认) / nuclei=苏木素逐核判正负(金标准)
+        self._cell_centroids = []   # 全图阳性细胞质心（叠加打点；= 自动 + 人工修正后）
+        self._manual_add = []       # 人工补的核质心 [(x,y)]（图像全图坐标）
+        self._manual_del = []       # 人工删的位置 [(x,y)]（命中自动核则不计入）
+        self._cells_edited = False  # 是否人工加减过核（summary 标注）
+        self._undo_cells = []       # 加减核撤销栈（与选区 packbits 栈分开，存 (add[:],del[:])）
+        self._defer_count = False   # 画刷期间临时跳过昂贵计数（停笔后防抖重算）
+        self._count_timer = QtCore.QTimer(self); self._count_timer.setSingleShot(True)
+        self._count_timer.timeout.connect(self._recount_now)
         self._cur_thr = 0
         self._red_full = None
         self._loaded_path = None
@@ -462,6 +554,35 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         self.chk_bg.toggled.connect(self._on_bg_toggled)
         bar2.addWidget(self.chk_bg)
         bar2.addSpacing(8)
+        # 阳性细胞计数（CD31/Ki67 数个数；分水岭分开粘连核 + 面积过滤，对齐 Fiji Watershed+Analyze Particles）
+        self.chk_count = QtWidgets.QCheckBox("计数阳性核")
+        self.chk_count.setToolTip("数阳性细胞核个数（CD31/Ki67 增殖细胞计数）；勾选后结果表加「阳性细胞数」列、叠加打点标记。\n分水岭自动分开粘连核；「核大小」调分裂粒度+剔噪。")
+        self.chk_count.toggled.connect(self._on_count_toggled)
+        bar2.addWidget(self.chk_count)
+        self.sp_cell = QtWidgets.QSpinBox(); self.sp_cell.setRange(2, 60); self.sp_cell.setValue(self._cell_size)
+        self.sp_cell.setPrefix("核 "); self.sp_cell.setSuffix(" px")
+        self.sp_cell.setToolTip("核大小≈最小核半径：调大→不易把粘连核拆过头、剔小噪点；调小→分得更细")
+        self.sp_cell.valueChanged.connect(self._on_cell_size)
+        bar2.addWidget(self.sp_cell)
+        self.btn_auto_cell = _qpush("自动核大小", "wand")
+        self.btn_auto_cell.setToolTip("从当前阳性区自动估计典型核尺度填入「核 px」（距离变换内切半径中位数）；给初值，可再微调")
+        self.btn_auto_cell.clicked.connect(self._auto_cell_size)
+        bar2.addWidget(self.btn_auto_cell)
+        self.sp_circ = QtWidgets.QDoubleSpinBox(); self.sp_circ.setRange(0.0, 1.0); self.sp_circ.setSingleStep(0.05)
+        self.sp_circ.setDecimals(2); self.sp_circ.setValue(0.0); self.sp_circ.setPrefix("圆度≥ ")
+        self.sp_circ.setToolTip("圆度过滤(对齐 ImageJ Analyze Particles，4π×面积/周长²)：剔细长非核伪影(血管壁/拖尾)。0=不过滤，核常用 0.5+")
+        self.sp_circ.valueChanged.connect(self._on_cell_circ)
+        bar2.addWidget(self.sp_circ)
+        self.chk_li = QtWidgets.QCheckBox("阳性率%")
+        self.chk_li.setToolTip("算标记指数 LI=阳性核/总核(Ki67/ER/PR 核标记金标准)：对苏木素复染通道数总核，结果表加「总核数」「阳性率%」。\n仅 DAB+苏木素类染色有效；需先勾「计数阳性核」。")
+        self.chk_li.toggled.connect(self._on_li_toggled)
+        bar2.addWidget(self.chk_li)
+        self.cb_count_mode = QtWidgets.QComboBox()
+        self.cb_count_mode.addItem("团块", "blob"); self.cb_count_mode.addItem("逐核", "nuclei")
+        self.cb_count_mode.setToolTip("计数口径：团块=直接数 DAB+ 色块(快)；逐核=苏木素数所有核逐核判正负(病理金标准,Ki67/ER/PR 建议;需 DAB+苏木素)")
+        self.cb_count_mode.currentIndexChanged.connect(self._on_count_mode)
+        bar2.addWidget(self.cb_count_mode)
+        bar2.addSpacing(8)
         self.b_auto = _qpush("自动阳性", "wand", True)
         self.b_auto.setToolTip("按当前染色/通道/阈值自动识别阳性区（高亮叠加显示）。之后可用套索/画笔在此基础上加/减修正。")
         self.b_auto.clicked.connect(self._auto_positive); bar2.addWidget(self.b_auto)
@@ -470,7 +591,8 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         bar2.addWidget(_lab("工具"))
         self.cb_tool = QtWidgets.QComboBox()
         self.cb_tool.addItem("画笔", "brush"); self.cb_tool.addItem("套索", "lasso"); self.cb_tool.addItem("框选区域", "roi")
-        self.cb_tool.setToolTip("画笔/套索 = 改阳性选区（不规则，纠正自动多选/漏选）：左键=加，右键或 Alt+左键=减。\n框选区域 = 画矩形子区域分别统计。")
+        self.cb_tool.addItem("加/减核", "count")
+        self.cb_tool.setToolTip("画笔/套索 = 改阳性选区（不规则，纠正自动多选/漏选）：左键=加，右键或 Alt+左键=减。\n框选区域 = 画矩形子区域分别统计。\n加/减核 = 计数手动修正(需先勾计数)：左键补漏数核、右键删多数的核（只改计数不改面积%）。")
         self.cb_tool.currentIndexChanged.connect(self._on_tool_changed)
         bar2.addWidget(self.cb_tool)
         self.sp_brush = QtWidgets.QSpinBox(); self.sp_brush.setRange(2, 200); self.sp_brush.setValue(14)
@@ -495,6 +617,7 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         self.view.roiAdded.connect(self.measure)
         self.view.maskStroke.connect(self._on_mask_stroke)
         self.view.lassoStroke.connect(self._on_lasso_stroke)
+        self.view.cellClick.connect(self._on_cell_click)
         self.view.editBegan.connect(self._push_undo)
         self.view.peekOriginal.connect(self._peek)
         self.view.toggleView.connect(self._toggle_view)
@@ -546,12 +669,9 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             _remember_dir("ihc", path); self.load_path(path)
 
     def load_path(self, path):
-        try:
-            rgb, _pix = load_rgb_and_pixmap(path)
-        except Exception as ex:
-            QtWidgets.QMessageBox.warning(self, "载入失败", str(ex)); return
         self._loaded_path = path
-        self._set_rgb(rgb)
+        self._reset_for_new_image()
+        self._submit_source(("path", path))        # 解码+16bit重标定+解卷积 全后台，主线程不卡
 
     def use_active_layer(self):
         if self.editor is None:
@@ -560,35 +680,94 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         img = layer.get("image") if isinstance(layer, dict) else None
         if img is None or img.isNull():
             QtWidgets.QMessageBox.information(self, "无图层", "没有可用的活动图层图像。请用「载入图片」。"); return
-        qimg = img.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
-        w, h = qimg.width(), qimg.height()
-        a = np.frombuffer(qimg.constBits(), np.uint8).reshape(h, w, 4)[..., :3].copy()
         self._loaded_path = None
-        self._set_rgb(np.ascontiguousarray(a))
+        self._reset_for_new_image()
+        self._submit_source(("qimg", img))         # QImage→numpy 大拷贝也移后台
 
     def _set_rgb(self, rgb):
+        """rgb 已在手（直传/离屏测试）：立即显示占位 + 后台解卷积。文件/图层载入走 load_path/use_active_layer。"""
+        self._reset_for_new_image()
         self._rgb = rgb
-        self._sr_pre = None; self._undo.clear()    # 新图：清天狼星红缓存与撤销栈
-        self.view.set_image(_rgb_to_pixmap(rgb))   # 清空旧框、适应窗口
-        self._recompute_deconv()
-        self._build_pos_mask()
-        self._rebuild_combos()                     # 默认显示=阳性叠加
-        self.measure()
-        self._refresh_display()
-        self.status.setText("已载入 %dx%d。红色=当前阳性区；拖滑块改阈值实时变；「手动修正」画笔加(左键)/减(右键)。"
-                            % (rgb.shape[1], rgb.shape[0]))
+        self.view.set_image(_rgb_to_pixmap(rgb))   # 小图占位即时显示（大图走 load_path 不进此路）
+        self._submit_source(("rgb", rgb))
 
-    def _recompute_deconv(self):
-        """按当前染色重算解卷积（红模式跳过）。"""
+    def _reset_for_new_image(self):
+        self._sr_pre = None; self._undo.clear()
+        self._proxy_rgb = None
+        self._rgb = None; self._conc = self._img8 = None
+        self._pos_mask = None; self._cell_centroids = []
+        self._manual_add = []; self._manual_del = []; self._cells_edited = False; self._undo_cells = []
+
+    # ---------------- 后台线程（解码+解卷积，主线程不卡）----------------
+    def _ensure_deconv_thread(self):
+        if self._deconv_thread is None:
+            self._deconv_thread = QtCore.QThread(self)
+            self._deconv_worker = _DeconvWorker()
+            self._deconv_worker.moveToThread(self._deconv_thread)
+            self._deconv_worker.done.connect(self._on_deconv_done)
+            self._deconv_trigger.connect(self._deconv_worker.run)
+            self._deconv_thread.start()
+
+    def _submit_source(self, source):
+        """提交一个图源(path/qimg/rgb)到后台：解码→(16bit重标定)→解卷积。token 防快速换图旧结果覆盖新图。"""
+        self._deconv_token += 1
+        self.status.setText("载入并解卷积中…（大图稍候，界面不会卡）")
+        self._ensure_deconv_thread()
+        self._deconv_worker.set_job(source, self._mode, self._stain, self._deconv_token)
+        self._deconv_trigger.emit()
+
+    def _start_deconv(self):
+        """重算当前图的解卷积（换染色用，rgb 已在手）。"""
         if self._rgb is None:
             return
-        self._hist_target = -1      # 染色/换图 → 通道数据变，强制重算直方图
-        if self._mode == "red":
+        self._submit_source(("rgb", self._rgb))
+
+    @QtCore.Slot(object)
+    def _on_deconv_done(self, res):
+        if res.get("token") != self._deconv_token:   # 过期回调（已换图/换染色）→ fail-loud 丢弃
+            return
+        self._hist_target = -1
+        if not res.get("ok"):
+            self.status.setText("载入/解卷积失败：%s" % res.get("error", "")); return
+        if res.get("rgb") is not None and self._rgb is None:   # 后台解码出的 rgb（path/qimg 源）→ 此刻才显示底图
+            self._rgb = res["rgb"]
+            self.view.set_image(_rgb_to_pixmap(self._rgb))
+        if res.get("mode") == "red":
+            self._sr_pre = res.get("sr_pre")
             self._conc = self._img8 = None
         else:
-            self._conc, self._img8 = iq.colour_deconvolution(self._rgb, self._stain)
+            self._conc, self._img8 = res["conc"], res["img8"]
             self._names = iq.STAIN_CHANNEL_NAMES.get(self._stain, ["Stain1", "Stain2", "Residual"])
             self._target_idx = self._default_target()
+        self._build_proxy()                        # 下采样预览代理（大图拖阈值用）
+        self._build_pos_mask()
+        self._rebuild_combos()
+        self.measure()
+        self._refresh_display()
+        if self._rgb is not None:
+            self.status.setText("已载入 %dx%d。红色=当前阳性区；拖滑块改阈值实时变；「手动修正」画笔加(左键)/减(右键)。"
+                                % (self._rgb.shape[1], self._rgb.shape[0]))
+
+    def _build_proxy(self):
+        """大图(长边>_PROXY_MAX)生成下采样代理：拖阈值在代理上算预览(快)，停手用全分辨率精算入表。"""
+        self._proxy_rgb = self._proxy_img8 = self._proxy_tissue = self._proxy_sr_pre = None
+        self._proxy_scale = 1.0
+        if self._rgb is None:
+            return
+        h, w = self._rgb.shape[:2]
+        if max(h, w) <= self._PROXY_MAX:
+            return                                  # 小图无需代理，拖动直接走全分辨率
+        import cv2
+        sc = self._PROXY_MAX / float(max(h, w))
+        nw, nh = max(1, round(w * sc)), max(1, round(h * sc))
+        self._proxy_scale = sc
+        self._proxy_rgb = cv2.resize(self._rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+        if self._mode == "red":
+            self._proxy_sr_pre = iq.sirius_red_precompute(self._proxy_rgb)   # 代理小，rgb2lab 快
+        elif self._img8 is not None:
+            self._proxy_img8 = [cv2.resize(ch, (nw, nh), interpolation=cv2.INTER_AREA) for ch in self._img8]
+            self._proxy_tissue = (iq.tissue_mask(self._proxy_rgb) if self._exclude_bg
+                                  else np.ones((nh, nw), bool))
 
     def _default_target(self):
         n = self._names
@@ -611,6 +790,8 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self._cur_thr = self._sat_min
             self._mask_edited = False
             return
+        if self._img8 is None:        # 解卷积尚在后台进行（async）→ 暂不建掩膜，done 回调里会重来
+            return
         self._tissue = iq.tissue_mask(self._rgb) if self._exclude_bg else np.ones(self._rgb.shape[:2], bool)
         ch = self._img8[self._target_idx]
         if self._hist_target != self._target_idx:    # 目标通道变了 → 更新直方图(组织内)
@@ -632,11 +813,37 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         if self._mode != "red" and self._thr_mode == "otsu":   # Otsu 算出新阈值 → 同步双头滑块([0,Otsu])
             self.range_slider.set_values(0, self._cur_thr)
             self.lb_thr.setText("Otsu≤%d·可拖调" % self._cur_thr)
+        # 勾计数时拖阈值：先跳过昂贵的全图 count_cells(distanceTransform+watershed,大图秒级)，
+        # 快出面积/阈值；阈值定后 220ms 再用 _count_timer 复算一次计数+标记（复用画刷同款防抖机制）。
+        if self._count_on:
+            self._defer_count = True
         self.measure(); self._refresh_display()
+        if self._count_on:
+            self._count_timer.start(220)
 
     def _schedule_rebuild(self):
         """阈值/灵敏度拖动防抖：合并快速拖动，停顿后才重算（标签即时更新在调用处）。"""
         self._thr_timer.start(40)
+
+    def _preview_threshold_proxy(self):
+        """大图拖阈值即时预览：在下采样代理上算阳性叠加(~15ms)，放大回全尺寸贴显示；
+        停手后 _rebuild_and_measure 用全分辨率精算入表。无代理(小图)则跳过，由防抖全分辨率刷。"""
+        if self._proxy_rgb is None or self.cb_disp.currentData() != "overlay":
+            return
+        if self._mode == "red":
+            if self._proxy_sr_pre is None:
+                return
+            pos = iq.sirius_red_mask(self._proxy_sr_pre, self._sat_min)["red_mask"]
+        else:
+            if self._proxy_img8 is None or self._thr_mode != "manual":
+                return                                 # Otsu 拖不动；手动才有 lo/hi
+            ch = self._proxy_img8[self._target_idx]
+            pos = (ch >= self._manual_lo) & (ch <= self._manual_thr) & self._proxy_tissue
+        pm = overlay_pixmap(self._proxy_rgb, pos, self._ov_color, self._ov_gray, self._ov_outline)
+        h, w = self._rgb.shape[:2]                      # 放大回全尺寸→占满原 scene rect（拖动求快用 Fast）
+        pm = pm.scaled(w, h, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
+                       QtCore.Qt.TransformationMode.FastTransformation)
+        self._show_pixmap(pm)
 
     # ---------------- 下拉/控件 ----------------
     def _rebuild_combos(self):
@@ -684,12 +891,27 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
 
     # ---------------- 显示 ----------------
     def _show_pixmap(self, pix):
+        if self._count_on and self._cell_centroids:
+            pix = self._paint_cell_markers(pix)
         v = self.view
         if v._pix_item is not None:
             v._pix_item.setPixmap(pix)
         else:
             v._pix_item = v.scene().addPixmap(pix); v.scene().setSceneRect(QtCore.QRectF(pix.rect()))
         v.viewport().update()
+
+    def _paint_cell_markers(self, pix):
+        """在显示图上为每个计数到的阳性细胞打一个小标记点（图像像素坐标，随缩放跟随）。"""
+        pm = QtGui.QPixmap(pix)
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        r = max(1.5, self._cell_size * 0.35)
+        pen = QtGui.QPen(QtGui.QColor("#ff1744")); pen.setWidthF(max(1.0, r * 0.5)); pen.setCosmetic(False)
+        p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        for (cx, cy) in self._cell_centroids:
+            p.drawEllipse(QtCore.QPointF(float(cx), float(cy)), r, r)
+        p.end()
+        return pm
 
     def _refresh_display(self):
         """按当前 cb_disp 选择重画底图（阳性叠加随选区变化时调用）。"""
@@ -701,10 +923,12 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self._show_pixmap(self._overlay_now())
         elif data == "rgb" or data is None:
             self._show_pixmap(_rgb_to_pixmap(self._rgb))
-        else:
+        elif self._img8 is not None and 0 <= int(data) < len(self._img8):
             idx = int(data)
             tint = _CHANNEL_TINT.get(self._names[idx], _DEFAULT_TINT)
             self._show_pixmap(channel_pixmap(self._img8[idx], tint))
+        else:
+            self._show_pixmap(_rgb_to_pixmap(self._rgb))   # 解卷积未完成 → 暂显原图
 
     def _on_display_changed(self, *_):
         self._refresh_display()
@@ -736,16 +960,16 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self._refresh_display()
 
     def _overlay_now(self):
+        if self._pos_mask is None:        # 解卷积未完成 → 暂显原图（不崩）
+            return _rgb_to_pixmap(self._rgb)
         return overlay_pixmap(self._rgb, self._pos_mask, self._ov_color, self._ov_gray, self._ov_outline)
 
     # ---------------- 参数变更（重建选区，丢手动修正）----------------
     def _on_stain_changed(self, name):
         self._stain = name
         self._mode = "red" if name == SIRIUS_RED_KEY else "deconv"
-        self._recompute_deconv()
-        self._build_pos_mask()
-        self._rebuild_combos()
-        self.measure(); self._refresh_display()
+        self._sr_pre = None; self._proxy_rgb = None
+        self._start_deconv()   # 后台重算解卷积；done 回调里 build_pos_mask/combos/measure/refresh
 
     def _on_target_changed(self, *_):
         d = self.cb_target.currentData()
@@ -759,6 +983,7 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
     def _on_threshold_slider(self, v):
         # 仅 red 模式可见：灵敏度
         self._sat_min = int(v); self.lb_thr.setText("灵敏度 %d" % v)
+        self._preview_threshold_proxy()
         self._schedule_rebuild()
 
     def _on_range_changed(self, lo, hi):
@@ -768,7 +993,8 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self.cb_thr.blockSignals(True); self.cb_thr.setCurrentIndex(1); self.cb_thr.blockSignals(False)
         self._manual_lo = int(lo); self._manual_thr = int(hi)
         self.lb_thr.setText("[%d,%d]" % (lo, hi))
-        self._schedule_rebuild()
+        self._preview_threshold_proxy()    # 大图即时代理预览（快）
+        self._schedule_rebuild()           # 防抖后全分辨率精算入表
 
     def _on_bg_toggled(self, on):
         self._exclude_bg = bool(on); self._rebuild_and_measure()
@@ -780,7 +1006,16 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         self.view.tool = tool
         edit = tool in ("brush", "lasso")
         self.sp_brush.setEnabled(tool == "brush")
-        self.view.setCursor(QtCore.Qt.CursorShape.CrossCursor if edit else QtCore.Qt.CursorShape.ArrowCursor)
+        self.view.setCursor(QtCore.Qt.CursorShape.CrossCursor if (edit or tool == "count")
+                            else QtCore.Qt.CursorShape.ArrowCursor)
+        if tool == "count":            # 加/减核：需先开计数，切到叠加看标记点
+            if not self._count_on:
+                self.chk_count.setChecked(True)
+            i = self.cb_disp.findData("overlay")
+            if i >= 0 and self.cb_disp.currentIndex() != i:
+                self.cb_disp.setCurrentIndex(i)
+            self.status.setText("加/减核：左键补漏数的核、右键删多数的核（只改计数不改面积%）；Ctrl+Z 撤销。")
+            return
         if edit:   # 编辑模式自动切到阳性叠加，看得见涂的效果
             i = self.cb_disp.findData("overlay")
             if i >= 0 and self.cb_disp.currentIndex() != i:
@@ -841,7 +1076,12 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self._ov_timer.start(60)                     # 轮廓模式全图重绘很贵 → 合并到停顿后一次（防卡）
         else:
             self._refresh_overlay_bbox(x0, y0, x1, y1)   # 填充模式只重绘笔刷 bbox，大图不卡
-        self.measure()
+        if self._count_on:
+            self._defer_count = True       # 画刷期间跳过昂贵的全图计数（distanceTransform+watershed）
+            self.measure()                 # 只更新面积/掩膜（快）
+            self._count_timer.start(220)   # 停笔 220ms 后重算计数+标记点
+        else:
+            self.measure()
 
     def _refresh_overlay_bbox(self, x0, y0, x1, y1):
         """按真实 _pos_mask 重算 [x0:x1,y0:y1] 小块的填充叠加，贴回显示底图（O(笔刷面积)）。"""
@@ -865,6 +1105,11 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self._undo.pop(0)
 
     def undo(self):
+        if self.view.tool == "count" and self._undo_cells:   # 加/减核工具下 Ctrl+Z 撤销核标记编辑
+            self._manual_add, self._manual_del = self._undo_cells.pop()
+            self._cells_edited = bool(self._manual_add or self._manual_del)
+            self.measure(); self._refresh_display()
+            self.status.setText("已撤销核标记（剩 %d 步）。" % len(self._undo_cells)); return
         if not self._undo:
             self.status.setText("没有可撤销的选区编辑。"); return
         packed, shape = self._undo.pop()
@@ -909,8 +1154,37 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         sel = pm & tm
         pos = int(sel.sum())
         area = (pos / denom * 100.0) if denom else 0.0
+        cnt, cents, total, li = None, [], None, None
+        if self._count_on and not self._defer_count and self._mode != "red" and pos:  # 阳性细胞计数（红色胶原模式不计数；画刷期间延后）
+            min_a = max(4, int(round(self._cell_size * self._cell_size * 0.6)))
+            ck = dict(min_area=min_a, max_area=min_a * 300, split=True,
+                      peak_min_dist=self._cell_size, min_circularity=self._cell_circ)
+            cs_idx = self._counterstain_idx()
+            hema = None
+            if cs_idx is not None and self._img8 is not None:
+                hema = self._img8[cs_idx]
+                hema = hema if rect is None else hema[rect[1]:rect[3], rect[0]:rect[2]]
+            if self._count_mode == "nuclei" and hema is not None:
+                # 苏木素逐核判正负（金标准，同 ihc_batch.count_and_li 口径）：数所有核→每核 DAB+ 占比>50% 判阳
+                r = iq.classify_nuclei(hema, tm, sel, **ck)
+                cnt, cents, total = r["positive"], r["pos_centroids"], r["total"]
+                li = r["li"] if self._li_on else None
+            else:                                               # DAB+ 团块直接数
+                cc = iq.count_cells(sel, **ck)
+                cnt, cents = cc["count"], cc["centroids"]
+                if self._li_on and hema is not None:            # 路线B：总核=苏木素核∪DAB核
+                    hthr = iq.otsu_threshold(hema[tm]) if tm.any() else 0
+                    total = iq.count_cells(((hema <= hthr) & tm) | sel, **ck)["count"]
+                    li = (cnt / total * 100.0) if total else None
+            if rect is None and (self._manual_add or self._manual_del):   # 全图叠加人工加/减核修正
+                n_before = len(cents)
+                cents = self._effective_centroids(cents); cnt = len(cents)
+                if total is not None:          # 分母同步：加阳性核→总核+1，删自动阳性核→总核-1（防 LI>100%）
+                    total = max(cnt, total + (cnt - n_before))
+                li = (cnt / total * 100.0) if (total and self._li_on) else li
         base = {"measure": "红色胶原", "area": area, "mean_od": None, "iod": None, "h_score": None,
-                "score": None, "tier": None, "label": "—", "pos_px": pos, "px": denom}
+                "score": None, "tier": None, "label": "—", "pos_px": pos, "px": denom,
+                "count": cnt, "centroids": cents, "total": total, "li": li}
         if self._mode == "red":
             base["thr"] = "灵敏度%d" % self._sat_min
             return base
@@ -928,12 +1202,102 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             out["h_score"] = iq.h_score(sub8, mask=tm)           # 经典 H-score 0-300
         return out
 
+    def _on_count_toggled(self, on):
+        self._count_on = bool(on)
+        if not on:
+            self._cell_centroids = []
+        self.measure()                    # 重测以加/去「阳性细胞数」列
+        self._refresh_display()           # 加/去标记点
+
+    def _effective_centroids(self, auto):
+        """自动质心叠加人工修正：删=剔掉被「删核」命中(<核大小)的自动核；加=追加「加核」点（Cell Counter 式）。"""
+        cs2 = max(2, self._cell_size) ** 2
+        if not self._manual_del:
+            out = list(auto)
+        else:
+            out = [(cx, cy) for (cx, cy) in auto
+                   if not any((cx - dx) ** 2 + (cy - dy) ** 2 < cs2 for (dx, dy) in self._manual_del)]
+        out.extend(self._manual_add)
+        return out
+
+    def _on_cell_click(self, x, y, additive):
+        if not self._count_on:
+            self.status.setText("请先勾「计数阳性核」，再用「加/减核」手动修正。"); return
+        cs2 = max(2, self._cell_size) ** 2
+        snap = (list(self._manual_add), list(self._manual_del))   # 改动前快照（仅在真改动时入栈）
+        if additive:                      # 加核：离已有任一质心太近则忽略（防重复点）
+            if any((x - cx) ** 2 + (y - cy) ** 2 < cs2 for (cx, cy) in self._cell_centroids):
+                self.status.setText("该处已有核，未重复添加。"); return
+            self._manual_add.append((float(x), float(y)))
+        else:                             # 删核：命中人工加的→直接移除；否则记入 _manual_del 剔自动核
+            hit = next((i for i, (ax, ay) in enumerate(self._manual_add)
+                        if (x - ax) ** 2 + (y - ay) ** 2 < cs2), None)
+            if hit is not None:
+                self._manual_add.pop(hit)
+            elif any((x - cx) ** 2 + (y - cy) ** 2 < cs2 for (cx, cy) in self._cell_centroids):
+                self._manual_del.append((float(x), float(y)))
+            else:
+                self.status.setText("附近没有可删除的核。"); return
+        self._undo_cells.append(snap)     # 确有改动才消耗撤销槽
+        if len(self._undo_cells) > 60:
+            self._undo_cells.pop(0)
+        self._cells_edited = True
+        self.measure(); self._refresh_display()
+
+    def _on_cell_size(self, v):
+        self._cell_size = int(v)
+        if self._count_on:
+            self.measure()
+            if self._manual_del:    # 减核点存图像坐标，核大小变→匹配半径变，可能不再精确命中
+                self.status.setText("核大小已变，原手动减核点按新检测重新匹配，请复核标记点。")
+
+    def _on_cell_circ(self, v):
+        self._cell_circ = float(v)
+        if self._count_on:
+            self.measure(); self._refresh_display()
+
+    def _on_count_mode(self, *_):
+        self._count_mode = self.cb_count_mode.currentData() or "blob"
+        if self._count_on:
+            self.measure(); self._refresh_display()
+            if self._manual_del:    # 切口径→自动核质心整体变，旧减核点可能错配，提示复核（fail-loud）
+                self.status.setText("已切计数口径，原手动减核点按新检测重新匹配，请复核标记点。")
+
+    def _auto_cell_size(self):
+        if self._pos_mask is None or self._mode == "red":
+            self.status.setText("自动核大小：需先有阳性区（DAB/灰度模式）。"); return
+        r = iq.estimate_nucleus_size(self._pos_mask & self._tissue)
+        self.sp_cell.setValue(max(2, min(60, r)))   # 触发 _on_cell_size→measure
+        self.status.setText("自动核大小 = %d px（按当前阳性区估计，可微调）" % self.sp_cell.value())
+
+    def _on_li_toggled(self, on):
+        self._li_on = bool(on)
+        if on and not self._count_on:        # LI 依赖计数 → 自动连带打开计数
+            self.chk_count.setChecked(True)  # 触发 _on_count_toggled→measure
+            return
+        if self._count_on:
+            self.measure()
+
+    def _counterstain_idx(self):
+        """复染(核)通道下标：优先名字含 Hematoxylin/Haematoxylin；否则取非目标、非 Residual 的首个通道。无则 None。"""
+        if self._mode != "deconv" or self._names is None:
+            return None
+        for i, n in enumerate(self._names):
+            if "ematoxylin" in n:
+                return i
+        for i, n in enumerate(self._names):
+            if i != self._target_idx and "Residual" not in n and "residual" not in n:
+                return i
+        return None
+
     def measure(self):
         self._results = []
         if self._rgb is None:
             self.table.setRowCount(0); return
         if self._pos_mask is None:
             self._build_pos_mask()
+        if self._pos_mask is None:        # 解卷积尚未完成（async）→ 暂无掩膜，等 done 回调再测
+            self.table.setRowCount(0); self._sync_empty_results(); return
         rows = [("全图", None)]
         for i, rect in enumerate(self.view.rois):
             if i in self.view.markers:
@@ -943,12 +1307,25 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             m = self._metrics_for_rect(rect)
             if m is not None:
                 self._results.append((label, m))
+        # 全图阳性细胞质心 → 叠加打点（仅全图，rect=None 时为全图坐标）
+        self._cell_centroids = self._results[0][1].get("centroids", []) if self._results else []
         self._fill_table(); self._update_summary()
+        if self._count_on and not self._defer_count:
+            self._refresh_display()   # 重画以叠加细胞标记点（画刷延后期间跳过，由 bbox 增量刷叠加）
+
+    def _recount_now(self):
+        """画刷停笔后防抖回调：恢复计数并整图重算+重绘标记点。"""
+        self._defer_count = False
+        if self._count_on:
+            self.measure()
 
     def _fill_table(self):
         self.table.setRowCount(len(self._results))
         for r, (label, m) in enumerate(self._results):
-            vals = [label, m["measure"], "%.2f" % m["area"], str(m["thr"]),
+            vals = [label, m["measure"], "%.2f" % m["area"],
+                    "—" if m.get("count") is None else str(m["count"]),
+                    "—" if m.get("total") is None else str(m["total"]),
+                    "—" if m.get("li") is None else "%.1f" % m["li"], str(m["thr"]),
                     "—" if m["mean_od"] is None else "%.1f" % m["mean_od"],
                     "—" if m.get("iod") is None else "%.4g" % m["iod"],
                     "—" if m.get("h_score") is None else "%.0f" % m["h_score"],
@@ -977,15 +1354,24 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self.lb_summary.setText(f"<b>全图</b>　红色胶原面积 <b>{m['area']:.2f}%</b>{edited}（天狼星红，占组织）")
         elif m["score"] is not None and m["tier"] is None:
             self.lb_summary.setText(f"<b>全图</b>　无可测组织（近白背景已排除）　染色 {self._stain}")
-        elif m["score"] is not None:
-            col = _TIER_COLOR.get(m["tier"], "#6b7280")
-            hs = ("　H-score %.0f" % m["h_score"]) if m.get("h_score") is not None else ""
-            self.lb_summary.setText(
-                f"<b>全图</b>：<span style='color:{col}'><b>{m['label']}</b></span>"
-                f"　IHC 分 {m['score']:.2f}/4{hs}　DAB 阳性 {m['area']:.1f}%（{m['thr']}）{edited}")
         else:
-            self.lb_summary.setText(
-                f"<b>全图</b>　{m['measure']} 阳性面积 <b>{m['area']:.2f}%</b>{edited}（{m['thr']}）　染色 {self._stain}")
+            cnt_txt = ("　阳性细胞 <b>%d</b> 个" % m["count"]) if m.get("count") is not None else ""
+            if m.get("li") is not None:
+                cnt_txt += "　阳性率(LI) <b>%.1f%%</b>（%d/%d 核）" % (m["li"], m["count"], m["total"])
+            if self._cells_edited:
+                cnt_txt += "（人工+%d/-%d" % (len(self._manual_add), len(self._manual_del))
+                if self._manual_del and self._li_on:
+                    cnt_txt += "；删核同步移出 LI 分母"     # 删核=否定此为核，分子分母同 -1
+                cnt_txt += "；仅作用于全图，子区为原始检测）" if self.view.rois else "）"
+            if m["score"] is not None:
+                col = _TIER_COLOR.get(m["tier"], "#6b7280")
+                hs = ("　H-score %.0f" % m["h_score"]) if m.get("h_score") is not None else ""
+                self.lb_summary.setText(
+                    f"<b>全图</b>：<span style='color:{col}'><b>{m['label']}</b></span>"
+                    f"　IHC 分 {m['score']:.2f}/4{hs}　DAB 阳性 {m['area']:.1f}%（{m['thr']}）{cnt_txt}{edited}")
+            else:
+                self.lb_summary.setText(
+                    f"<b>全图</b>　{m['measure']} 阳性面积 <b>{m['area']:.2f}%</b>{cnt_txt}{edited}（{m['thr']}）　染色 {self._stain}")
 
     def _on_table_sel(self):
         rows = self.table.selectionModel().selectedRows()
@@ -1011,12 +1397,17 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
-                w.writerow(["区域", "染色", "测量通道", "阳性面积%", "阈值", "平均OD", "IOD", "H-score(0-300)",
+                w.writerow(["区域", "染色", "测量通道", "阳性面积%", "阳性细胞数", "人工加核", "人工删核", "总核数", "阳性率%LI", "阈值", "平均OD", "IOD", "H-score(0-300)",
                             "IHC分(0-4)", "分级", "阳性像素", "组织像素", "手动修正", "来源"])
                 src = self._loaded_path or "(当前图层)"
                 edited = "是" if self._mask_edited else "否"
                 for label, m in self._results:
-                    w.writerow([label, self._stain, m["measure"], "%.4f" % m["area"], m["thr"],
+                    w.writerow([label, self._stain, m["measure"], "%.4f" % m["area"],
+                                "" if m.get("count") is None else m["count"],
+                                len(self._manual_add) if (label == "全图" and self._cells_edited) else "",
+                                len(self._manual_del) if (label == "全图" and self._cells_edited) else "",
+                                "" if m.get("total") is None else m["total"],
+                                "" if m.get("li") is None else "%.2f" % m["li"], m["thr"],
                                 "" if m["mean_od"] is None else "%.4f" % m["mean_od"],
                                 "" if m.get("iod") is None else "%.4f" % m["iod"],
                                 "" if m.get("h_score") is None else "%.2f" % m["h_score"],
@@ -1025,6 +1416,20 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
             self.status.setText("已导出 %d 行 → %s" % (len(self._results), path))
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "导出失败", str(ex))
+
+    # ---------------- 生命周期 ----------------
+    def stop_threads(self):
+        """停后台解卷积线程（quit+限时wait+兜底terminate）。本面板装在 FloatingToolWindow 里、closeEvent 常规不触发，
+        由 EditorWindow.closeEvent 退出时显式调用（与图像描摹面板同坑，铁律③：QThread 销毁仍运行会硬崩）。"""
+        if self._deconv_thread is not None:
+            self._deconv_thread.quit()
+            if not self._deconv_thread.wait(3000):
+                self._deconv_thread.terminate(); self._deconv_thread.wait(1000)
+            self._deconv_thread = None; self._deconv_worker = None
+
+    def closeEvent(self, e):
+        self.stop_threads()
+        super().closeEvent(e)
 
 
 # ============================ 批量定量（多图审核版） ============================
@@ -1045,7 +1450,7 @@ class _BatchWorker(QtCore.QObject):
 class IHCBatchDialog(QtWidgets.QDialog):
     """多图批量阳性面积%：统一设置一键跑 → 左列表 + 叠加预览审核 + 汇总表 + 组聚合(模型 vs 对照) + CSV。"""
 
-    COLS = ["#", "文件", "组", "测量", "阳性面积%", "阈值", "平均OD", "IOD", "H-score", "IHC分", "分级", "阳性px", "组织px"]
+    COLS = ["#", "文件", "组", "测量", "阳性面积%", "阳性细胞数", "总核数", "阳性率%", "阈值", "平均OD", "IOD", "H-score", "IHC分", "分级", "阳性px", "组织px"]
 
     def __init__(self, parent=None, init_stain="H DAB"):
         super().__init__(parent)
@@ -1121,6 +1526,24 @@ class IHCBatchDialog(QtWidgets.QDialog):
         self.sp_sat = QtWidgets.QSpinBox(); self.sp_sat.setRange(0, 100); self.sp_sat.setValue(50); self.sp_sat.setPrefix("灵敏度"); self.sp_sat.setFixedWidth(86)
         top.addWidget(self.rg_global); top.addWidget(self.sp_sat)
         self.chk_bg = QtWidgets.QCheckBox("排除近白背景"); self.chk_bg.setChecked(True); top.addWidget(self.chk_bg)
+        # 阳性细胞计数（CD31/Ki67），与单图同口径；勾选后批量结果加「阳性细胞数」列 + CSV
+        self.chk_count = QtWidgets.QCheckBox("计数阳性核")
+        self.chk_count.setToolTip("批量也数阳性细胞核个数（与单图同口径：分水岭分粘连核+面积过滤）；勾选后结果表/CSV 加「阳性细胞数」列。")
+        top.addWidget(self.chk_count)
+        self.sp_cell = QtWidgets.QSpinBox(); self.sp_cell.setRange(2, 60); self.sp_cell.setValue(8)
+        self.sp_cell.setPrefix("核 "); self.sp_cell.setSuffix(" px"); self.sp_cell.setToolTip("核大小≈最小核半径（与单图一致）")
+        top.addWidget(self.sp_cell)
+        self.sp_circ = QtWidgets.QDoubleSpinBox(); self.sp_circ.setRange(0.0, 1.0); self.sp_circ.setSingleStep(0.05)
+        self.sp_circ.setDecimals(2); self.sp_circ.setValue(0.0); self.sp_circ.setPrefix("圆度≥ ")
+        self.sp_circ.setToolTip("圆度过滤(4π×面积/周长²)剔细长非核伪影；0=不过滤（与单图一致）")
+        top.addWidget(self.sp_circ)
+        self.chk_li = QtWidgets.QCheckBox("阳性率%")
+        self.chk_li.setToolTip("算 LI=阳性核/总核(Ki67/ER/PR)：对苏木素复染数总核，结果加「总核数」「阳性率%」列（与单图一致）")
+        top.addWidget(self.chk_li)
+        self.cb_count_mode = QtWidgets.QComboBox()
+        self.cb_count_mode.addItem("团块", "blob"); self.cb_count_mode.addItem("逐核", "nuclei")
+        self.cb_count_mode.setToolTip("计数口径：团块=数 DAB+ 色块；逐核=苏木素数所有核逐核判正负(金标准，与单图一致)")
+        top.addWidget(self.cb_count_mode)
         top.addStretch(1)
         self.b_run = _push("运行批量", "wand", True); self.b_run.clicked.connect(self._run); top.addWidget(self.b_run)
         self.b_csv = _push("导出 CSV", "download"); self.b_csv.clicked.connect(self._export); top.addWidget(self.b_csv)
@@ -1257,6 +1680,9 @@ class IHCBatchDialog(QtWidgets.QDialog):
                 "thr_mode": "manual" if self.cb_thr.currentIndex() == 1 else "otsu",
                 "manual_lo": lo, "manual_hi": hi,
                 "sat_min": self.sp_sat.value(), "exclude_bg": self.chk_bg.isChecked(),
+                "count_on": self.chk_count.isChecked(), "cell_size": self.sp_cell.value(),
+                "cell_circ": self.sp_circ.value(), "li_on": self.chk_li.isChecked(),
+                "count_mode": self.cb_count_mode.currentData() or "blob",
                 "stain_label": stain}
 
     def _base_settings(self):
@@ -1381,6 +1807,9 @@ class IHCBatchDialog(QtWidgets.QDialog):
     def _set_table_row(self, i, r):
         vals = [str(i + 1), r["name"], r["group"], r.get("target", ""),
                 ("%.3f" % r["area_pct"]) if r["ok"] else "失败",
+                "—" if r.get("count") is None else str(r["count"]),
+                "—" if r.get("total") is None else str(r["total"]),
+                "—" if r.get("li") is None else "%.1f" % r["li"],
                 r.get("thr_label") or "—",
                 "—" if r.get("mean_od") is None else "%.1f" % r["mean_od"],
                 "—" if r.get("iod") is None else "%.4g" % r["iod"],
@@ -1389,7 +1818,7 @@ class IHCBatchDialog(QtWidgets.QDialog):
                 str(r.get("pos_px", 0)), str(r.get("tissue_px", 0))]
         gc = self.COLS.index("分级")
         for c, v in enumerate(vals):
-            it = _table_item(v, numeric=(c not in (0, 1, 2, 3, 5, gc)), key=(c == 4))
+            it = _table_item(v, numeric=(c not in (0, 1, 2, 3, 8, gc)), key=(c == 4))
             if c == gc and r.get("tier"):
                 it.setForeground(QtGui.QColor(_TIER_COLOR.get(r["tier"], "#6b7280")))
             self.table.setItem(i, c, it)
@@ -1450,7 +1879,7 @@ class IHCBatchDialog(QtWidgets.QDialog):
         path = self._paths[row]
         try:
             rgb = ib.load_rgb(path)
-            pos, tissue, target, thr_label, cc, ch8, is_dab = ib._compute(rgb, self._eff_settings(path))
+            pos, tissue, target, thr_label, cc, ch8, is_dab, cs_ch = ib._compute(rgb, self._eff_settings(path))
         except Exception as ex:
             self.view.clear(); self.lb_one.setText("预览失败:%s" % ex); self._cur = None; return
         if ch8 is not None:
@@ -1461,8 +1890,8 @@ class IHCBatchDialog(QtWidgets.QDialog):
             except Exception:
                 pass
         self._cur = {"path": path, "rgb": rgb, "mask": pos.copy(), "tissue": tissue,
-                     "target": target, "cc": cc, "ch8": ch8, "is_dab": is_dab,
-                     "thr_label": thr_label, "sr_pre": None}   # sr_pre: 天狼星红 rgb2lab 预计算缓存(拖灵敏度复用)
+                     "target": target, "cc": cc, "ch8": ch8, "is_dab": is_dab, "cs_ch": cs_ch,
+                     "thr_label": thr_label, "sr_pre": None}   # cs_ch:苏木素复染通道(逐图改后重算LI)；sr_pre:天狼星红缓存
         self._undo1 = []; self._show_raw_one = False
         self.view.set_image(overlay_pixmap(rgb, pos))   # 适应窗口
 
@@ -1498,6 +1927,8 @@ class IHCBatchDialog(QtWidgets.QDialog):
         lbl = thr_label if thr_label is not None else (
             "手动修正" if c["path"] in self._edited else c.get("thr_label", ""))   # 撤到底回原阈值标签
         m = ib.metrics_from(c["mask"], c["tissue"], c["target"], lbl, c["cc"], c["ch8"], c["is_dab"])
+        if m["pos_px"] > 0:                      # 逐图手改后补算 计数/总核/LI（走 full_metrics 同一口径，否则被静默清空）
+            m.update(ib.count_and_li(c["mask"] & c["tissue"], c["tissue"], c.get("cs_ch"), self._base_settings()))
         self._results[self._cur_idx].update(**m)
         self._update_one_row(self._cur_idx)      # 只刷当前行(O(1))，画笔每笔不再全表重建
         self._update_group()
@@ -1569,10 +2000,10 @@ class IHCBatchDialog(QtWidgets.QDialog):
         if self._base_settings().get("mode") == "red":
             return
         try:
-            _p, t, _tg, _th, _cc, ch8, _d = ib._compute(ib.load_rgb(path), self._base_settings())
+            _p, t, _tg, _th, _cc, ch8, _d, _cs = ib._compute(ib.load_rgb(path), self._base_settings())
             self.rg_global.set_histogram(np.bincount(ch8[t], minlength=256)[:256])
-        except Exception:
-            pass
+        except Exception as ex:                  # fail-loud：直方图喂送失败上浮，不静默吞
+            self.lb_one.setText("⚠ 直方图预览失败:%s" % ex)
 
     def _render_raw(self, path):
         try:

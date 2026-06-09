@@ -102,22 +102,51 @@ def _setup_result_table(table: QtWidgets.QTableWidget, export_cb=None):
     table.customContextMenuRequested.connect(lambda pos: _show_table_menu(table, pos, export_cb))
 
 
+def _pil_rgb_to_qimage(rgb_im) -> "QtGui.QImage":
+    """8-bit PIL RGB → QImage（原样显示彩色/调色板图）。"""
+    return QtGui.QImage(rgb_im.tobytes(), rgb_im.width, rgb_im.height,
+                        rgb_im.width * 3, QtGui.QImage.Format.Format_RGB888).copy()
+
+
+def _gray_to_qimage(arr) -> "QtGui.QImage":
+    """缩放后的 0-255 灰度测量数组 → QImage（显示=分析所用图，16/32-bit 不再被钳成全白）。"""
+    d8 = np.ascontiguousarray(np.clip(np.asarray(arr), 0, 255).astype(np.uint8))
+    h, w = d8.shape[:2]
+    rgb = np.ascontiguousarray(np.repeat(d8[..., None], 3, axis=2))
+    return QtGui.QImage(rgb.tobytes(), w, h, 3 * w, QtGui.QImage.Format.Format_RGB888).copy()
+
+
 def load_signal_and_pixmap(path, weighted: bool = False):
     """返回 (measure_array float 0-255, display_pixmap, polarity_auto)。ImageJ Image>Type>8-bit 同口径：
-    调色板图=原始索引；16/32-bit 按显示范围(min→0,max→255)缩放；RGB→(R+G+B)/3 非加权(weighted=True 切加权)。"""
+    调色板图=原始索引；16/32-bit/浮点 按显示范围(min→0,max→255)缩放；RGB→(R+G+B)/3 非加权(weighted=True 切加权)。
+
+    高位深判定按 dtype（非 uint8）或 mode 前缀 'I'/'F' —— 覆盖 I;16/I;16B/I;16L/I;16N（大/小端 16-bit，扫描仪常见），
+    避免它们漏进 8-bit 分支被 convert('RGB') 钳成全白 → 灰度翻转 → 峰倒置/识别不了（实测 bug）。
+    显示图由缩放后的测量数组构造（非 im.convert('RGB')），保证「显示==分析」，且 16-bit 不再显示空白。
+    """
     from PIL import Image
     im = Image.open(path)
-    if im.mode == "P":
-        arr = np.asarray(im).astype(np.float64)          # 原始索引，ImageJ 同口径
-    elif im.mode in ("I", "I;16", "F"):                  # 16/32-bit → 8-bit（Scale When Converting）
-        raw = np.asarray(im).astype(np.float64)
-        mn, mx = float(raw.min()), float(raw.max())
-        arr = np.clip(np.floor((raw - mn) * (256.0 / (mx - mn + 1)) + 0.5), 0, 255) if mx > mn else np.zeros_like(raw)
-    else:
+    raw = np.asarray(im)
+    mode = im.mode
+    is_highdepth = (raw.dtype != np.uint8) or mode.startswith("I") or mode == "F"
+    if mode == "P":
+        arr = raw.astype(np.float64)                       # 调色板原始索引，ImageJ 同口径
+        qimg = _pil_rgb_to_qimage(im.convert("RGB"))       # 调色板按真色显示
+    elif is_highdepth:                                     # 16/32-bit/浮点（含 I;16B/L/N）→ min-max 缩放到 8-bit
+        r = raw.astype(np.float64)
+        if r.ndim == 3:                                    # 多通道高位深 → 先转灰（均值，ImageJ 默认）
+            r = r[..., :3].mean(axis=2)
+        finite = np.isfinite(r)                            # fail-loud：浮点 TIF 的 NaN/inf 否则会把整图压成全 0（黑）
+        if not finite.all():
+            print("[wb load] 警告：高位深图含 %d 个非有限像素(NaN/inf)，已置 0 处理" % int((~finite).sum()))
+            r = np.where(finite, r, 0.0)
+        mn, mx = float(r.min()), float(r.max())
+        arr = (np.clip(np.floor((r - mn) * (256.0 / (mx - mn + 1)) + 0.5), 0, 255)
+               if mx > mn else np.zeros_like(r))
+        qimg = _gray_to_qimage(arr)                        # 显示=缩放后灰度（修复 16-bit 全白显示）
+    else:                                                  # 8-bit RGB/L → 原路径（JPG/PNG/8-bit TIF 不变）
         arr = wb.to_gray(np.asarray(im.convert("RGB")), weighted=weighted)
-    disp = im.convert("RGB")
-    qimg = QtGui.QImage(disp.tobytes(), disp.width, disp.height,
-                        disp.width * 3, QtGui.QImage.Format.Format_RGB888).copy()
+        qimg = _pil_rgb_to_qimage(im.convert("RGB"))
     pol = "light_on_dark" if float(np.median(arr)) < 128 else "dark_on_light"
     return arr, QtGui.QPixmap.fromImage(qimg), pol
 
