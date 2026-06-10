@@ -118,11 +118,16 @@ class ImageTracePanel(QtWidgets.QWidget):
         self._custom_palette = []   # 文档库自定义色板（hex，预留）
         self._ignore_palette = []   # 忽略指定颜色（hex 列表，含吸管取色）
         self._colors_is_threshold = False  # 黑白模式下「颜色数」滑块复用为「阈值」
+        self._text_remove = False   # 描摹前删文字：开关
+        self._text_boxes = []       # MSER 检测的文字行框 [(x0,y0,x1,y1)]（图像坐标），点框可删误判
+        self._text_map = None       # (scale, ox, oy) 预览 QLabel→图像坐标映射（点框删用）
+        self._draw_rect = None      # 拖框补标文字中的临时框（图像坐标）
         self._debounce = QtCore.QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(320)
         self._debounce.timeout.connect(lambda: self._request("preview"))
         self._build_ui()
+        self.preview.installEventFilter(self)   # 点预览红框删文字框
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -196,7 +201,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.sld_corners, corners_box = self._slider(0, 100, 50, "高=更多尖角；低=更平滑")
         form.addRow("边角", corners_box)
 
-        self.sld_noise, noise_box = self._slider(0, 100, 10, "去除小于该像素面积的杂色斑点（清掉抗锯齿碎边，默认10）")
+        self.sld_noise, noise_box = self._slider(0, 100, 16, "去除小于该像素面积的杂色斑点（清掉抗锯齿软边的碎路径，默认16；小元素被吃掉就调低）")
         form.addRow("杂色", noise_box)
 
         self.cmb_method = QtWidgets.QComboBox()
@@ -223,6 +228,9 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.chk_snap.setToolTip("把近水平/垂直的线段吸附成正交直线（坐标轴/直边更整洁）")
         self.chk_transparent = QtWidgets.QCheckBox("透明度（忽略白底）")
         self.chk_transparent.setToolTip("丢弃近白底色块 → 透明背景，便于叠加到其它图层")
+        self.chk_group = QtWidgets.QCheckBox("描完打组")
+        self.chk_group.setToolTip("勾上：描摹结果包成一个组（整体移动/管理）；不勾(默认)：每个图形元素是独立对象，\n应用后可直接逐个拖动调整，无需先撤组。")
+        self.chk_group.setChecked(False)   # 默认不打组 → 描完每个元素直接可拖（用户要的所见即所得编辑）
         right.addWidget(self.chk_snap)
         trow = QtWidgets.QHBoxLayout()
         trow.addWidget(self.chk_transparent, 1)
@@ -231,6 +239,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.btn_ignore.clicked.connect(self._pick_ignore_color)
         trow.addWidget(self.btn_ignore)
         right.addLayout(trow)
+        right.addWidget(self.chk_group)
 
         # 参数变化 → debounce 预览
         for w in (self.cmb_mode, self.cmb_palette, self.cmb_method, self.cmb_curve, self.cmb_create):
@@ -240,6 +249,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.spin_stroke.valueChanged.connect(self._on_param_change)
         self.chk_snap.toggled.connect(self._on_param_change)
         self.chk_transparent.toggled.connect(self._on_param_change)
+        # 「描完打组」只在应用时影响产物(是否包 <g>)，不改预览渲染 → 不触发重预览
         # 模式/调板/创建 改变 → 同步控件可用性与「颜色数↔阈值」语义
         self.cmb_mode.currentIndexChanged.connect(self._sync_controls)
         self.cmb_palette.currentIndexChanged.connect(self._sync_controls)
@@ -251,6 +261,20 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.status.setWordWrap(True)
         self.status.setStyleSheet(f"color:{tc['muted']};")
         right.addWidget(self.status)
+
+        # 描摹前删文字：检测文字行 → 红框给用户看 → 点框删误判 → 描摹时 inpaint 抹除（守住"每个素材都能描边"）
+        trow = QtWidgets.QHBoxLayout(); trow.setSpacing(6)
+        self.btn_detect = QtWidgets.QPushButton("检测文字")
+        self.btn_detect.setToolTip("MSER 检测横排文字行并画红框；点框删误判；勾「描摹前删文字」后描摹会 inpaint 抹掉这些框\n（孤立小素材不成行→不框→照常描；删错点框移除即可，不动源数据可逆）")
+        self.btn_detect.clicked.connect(self._detect_text)
+        self.chk_rmtext = QtWidgets.QCheckBox("描摹前删文字")
+        self.chk_rmtext.setToolTip("勾上：描摹会先把确认的文字框 inpaint 抹掉再描，结果不含糊文字。需先「检测文字」并核对红框。")
+        self.chk_rmtext.toggled.connect(self._on_rmtext_toggled)
+        self.btn_clrtext = QtWidgets.QPushButton("清空框")
+        self.btn_clrtext.setToolTip("清掉所有文字框（不删文字）")
+        self.btn_clrtext.clicked.connect(self._clear_text)
+        trow.addWidget(self.btn_detect); trow.addWidget(self.chk_rmtext); trow.addWidget(self.btn_clrtext); trow.addStretch(1)
+        right.addLayout(trow)
 
         self.btn_apply = QtWidgets.QPushButton("应用为矢量层（全分辨率）")
         self.btn_apply.setToolTip("用原始分辨率重新描摹并登记为可编辑矢量层（可继续改色/改节点，导出 SVG/PDF）")
@@ -284,10 +308,12 @@ class ImageTracePanel(QtWidgets.QWidget):
                 lab.setText(str(s.value()))
 
     # 6 个一键预设（对齐 AI 顶部图标条）：(短名, 说明, 一组控件设定)。引擎不在预设里（固定 vtracer，描边自动降级）。
-    # 实测：扁平科研图「受限色 + 高杂色」边缘最干净、路径少不卡、对齐 AI 流程 → 设为默认「清晰」。
+    # 实测重标定(科研简单风扁平插画 2026-06-10)：自动色(非受限)+杂色16 最干净。旧默认杂色4 把抗锯齿软边描成
+    # 2500+ 碎路径(=效果差主因)；受限24 反比自动色多 3.5× 路径(预量化硬色阶→更多层)。自动色+杂色16→全色保真、
+    # 每个非文字素材干净描出、路径 300-500 可拖；文字会糊(预期,用户「除了字体」)。需更细可下调杂色。
     PRESETS = [
-        ("清晰", "清晰描摹（受限24色+去杂色，边缘干净·路径少不卡·扁平图首选）", dict(mode=0, palette=1, colors=24, noise=10, paths=50, corners=70, curve=0, create=0)),
-        ("高保真", "高保真（自动色，保留渐变细节，路径多更重，适合带柔和阴影的渲染图）", dict(mode=0, palette=0, colors=0, noise=4, paths=60, corners=50, curve=0, create=0)),
+        ("清晰", "清晰描摹（自动色+杂色16，边缘干净·全色保真·路径少可拖·扁平科研图首选）", dict(mode=0, palette=0, colors=0, noise=16, paths=50, corners=70, curve=0, create=0)),
+        ("高保真", "高保真（自动色+低杂色8，保留更多细节/小元素，路径更多更重，适合带柔和阴影的渲染图）", dict(mode=0, palette=0, colors=0, noise=8, paths=60, corners=50, curve=0, create=0)),
         ("低色", "低色简化（受限 8 色，海报扁平风）", dict(mode=0, palette=1, colors=8, noise=12, paths=40, corners=60, curve=0, create=0)),
         ("灰度", "灰度", dict(mode=1, palette=0, colors=0, noise=8, paths=50, curve=0, create=0)),
         ("黑白", "黑白（二值）", dict(mode=2, paths=50, curve=0, create=0)),
@@ -399,6 +425,10 @@ class ImageTracePanel(QtWidgets.QWidget):
     def _set_rgb(self, rgb):
         self._rgb = rgb
         self._last_svg = None
+        self._text_boxes = []; self._text_map = None; self._draw_rect = None   # 新图清旧文字框（坐标对不上新图）
+        if getattr(self, "chk_rmtext", None) is not None:
+            self.chk_rmtext.blockSignals(True); self.chk_rmtext.setChecked(False); self.chk_rmtext.blockSignals(False)
+        self._text_remove = False
         h, w = rgb.shape[:2]
         self.lbl_src.setText(f"{self._src_name or '图片'} · {w}×{h}")
         self.btn_apply.setEnabled(True)
@@ -435,6 +465,7 @@ class ImageTracePanel(QtWidgets.QWidget):
             ignore_white=self.chk_transparent.isChecked(),
             ignore_colors=list(self._ignore_palette) if self._ignore_palette else None,
             snap_lines=self.chk_snap.isChecked(),
+            group=self.chk_group.isChecked(),   # 默认不打组 → 每个元素独立可拖
             bw_threshold=bw_threshold,
             max_dim=0 if full else self.PREVIEW_DIM,
         )
@@ -462,7 +493,14 @@ class ImageTracePanel(QtWidgets.QWidget):
         self._busy = True
         self.btn_apply.setEnabled(not full and self._rgb is not None)
         self.status.setText("描摹中…（全分辨率）" if full else "预览中…")
-        self._worker.set_job(np.ascontiguousarray(self._rgb), params, full)
+        src = self._rgb
+        if self._text_remove and self._text_boxes:        # 描摹前删文字：inpaint 抹除确认的文字框
+            try:
+                import image_trace as itr2
+                src = itr2.remove_text(self._rgb, self._text_boxes)
+            except Exception:  # noqa: BLE001 —— 抹除失败则用原图描，不致崩
+                src = self._rgb
+        self._worker.set_job(np.ascontiguousarray(src), params, full)
         self._trigger.emit()
 
     # ---------------- 结果回调 ----------------
@@ -533,12 +571,39 @@ class ImageTracePanel(QtWidgets.QWidget):
         super().resizeEvent(e)
         self._render_view()
 
+    def _with_boxes(self, pix):
+        """在显示 pixmap 上画文字红框 + 在绘的临时框 + 记录 QLabel→图像坐标映射（供点删/拖框补标）。"""
+        self._text_map = None
+        if self._rgb is None:
+            return pix
+        W = self._rgb.shape[1]
+        s = pix.width() / float(W) if W else 1.0
+        pm = QtGui.QPixmap(pix); p = QtGui.QPainter(pm)
+        pen = QtGui.QPen(QtGui.QColor("#ff1744")); pen.setWidth(2); p.setPen(pen)
+        p.setBrush(QtGui.QColor(255, 23, 68, 38))
+        for (x0, y0, x1, y1) in self._text_boxes:
+            p.drawRect(int(x0 * s), int(y0 * s), int((x1 - x0) * s), int((y1 - y0) * s))
+        dr = getattr(self, "_draw_rect", None)           # 拖框补标中的临时框（虚线）
+        if dr is not None:
+            pen2 = QtGui.QPen(QtGui.QColor("#2979ff")); pen2.setWidth(2)
+            pen2.setStyle(QtCore.Qt.PenStyle.DashLine); p.setPen(pen2); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            x0, y0, x1, y1 = dr
+            p.drawRect(int(min(x0, x1) * s), int(min(y0, y1) * s), int(abs(x1 - x0) * s), int(abs(y1 - y0) * s))
+        p.end()
+        lw, lh = self.preview.width(), self.preview.height()
+        self._text_map = (s, (lw - pm.width()) / 2.0, (lh - pm.height()) / 2.0)
+        return pm
+
     def _render_view(self):
         """按当前视图模式渲染预览：0描摹结果/1带轮廓/2轮廓/3轮廓带源图/4源图像。"""
         if self._rgb is None:
             return
         fw = max(100, self.preview.width() - 8)
         fh = max(100, self.preview.height() - 8)
+        if self._text_remove or self._text_boxes:          # 文字框确认模式：源图 + 红框（点删误判 / 拖框补漏检）
+            self.preview.setPixmap(self._with_boxes(_rgb_to_pixmap(self._rgb, fw, fh)))
+            return
+        self._text_map = None
         m = self._view_mode
         try:
             if m == 4 or (m != 4 and not self._last_svg):  # 源图像 / 尚无描摹结果 → 显原图
@@ -558,6 +623,73 @@ class ImageTracePanel(QtWidgets.QWidget):
                 self.preview.setPixmap(_overlay(base, over))
         except Exception as e:  # noqa: BLE001 —— 预览渲染失败不致崩面板
             self.status.setText(f"预览渲染失败：{e}")
+
+    # ---------------- 描摹前删文字（MSER 检测 → 预览红框 → 点框删误判 → inpaint 抹除）----------------
+    def _detect_text(self):
+        if self._rgb is None:
+            self.status.setText("先载入图片再检测文字。"); return
+        try:
+            import image_trace as itr2
+            self._text_boxes = itr2.detect_text_regions(self._rgb)
+        except Exception as e:  # noqa: BLE001
+            self.status.setText(f"文字检测失败：{e}"); return
+        if not self._text_boxes:
+            self.status.setText("没检测到成行文字（孤立小素材不会被框/删）。"); return
+        self.chk_rmtext.blockSignals(True); self.chk_rmtext.setChecked(True); self.chk_rmtext.blockSignals(False)
+        self._text_remove = True
+        self._render_view()
+        self.status.setText("检测到 %d 个文字行（红框）。点框可删误判；勾「描摹前删文字」已开 → 描摹会 inpaint 抹掉这些框。"
+                            % len(self._text_boxes))
+
+    def _clear_text(self):
+        self._text_boxes = []; self._text_map = None; self._draw_rect = None
+        self.chk_rmtext.blockSignals(True); self.chk_rmtext.setChecked(False); self.chk_rmtext.blockSignals(False)
+        self._text_remove = False
+        self._render_view()
+        self.status.setText("已清空文字框（不删文字）。")
+
+    def _on_rmtext_toggled(self, on):
+        self._text_remove = bool(on)
+        if on and not self._text_boxes and self._rgb is not None:
+            self._detect_text()        # 勾上但还没检测 → 顺手检测
+        else:
+            self._render_view()
+
+    def _ev_img_xy(self, ev):
+        """预览鼠标坐标 → 图像坐标（按 _text_map 映射）。无映射返回 None。"""
+        if not self._text_map:
+            return None
+        s, ox, oy = self._text_map
+        pos = ev.position() if hasattr(ev, "position") else ev.pos()
+        return ((pos.x() - ox) / s, (pos.y() - oy) / s)
+
+    def eventFilter(self, obj, ev):
+        # 文字框确认模式：点红框→删该框（误判，可逆）；空白处拖框→补标漏检文字
+        if obj is self.preview and (self._text_remove or self._text_boxes):
+            et = ev.type()
+            if et == QtCore.QEvent.Type.MouseButtonPress:
+                xy = self._ev_img_xy(ev)
+                if xy is not None:
+                    ix, iy = xy
+                    for i, (x0, y0, x1, y1) in enumerate(self._text_boxes):
+                        if x0 <= ix <= x1 and y0 <= iy <= y1:          # 命中已有框 → 删
+                            self._text_boxes.pop(i); self._render_view()
+                            self.status.setText("已移除该框（剩 %d 个）。" % len(self._text_boxes)); return True
+                    self._draw_rect = (ix, iy, ix, iy)               # 空白处 → 开始拖框
+                    return True
+            elif et == QtCore.QEvent.Type.MouseMove and getattr(self, "_draw_rect", None):
+                xy = self._ev_img_xy(ev)
+                if xy is not None:
+                    self._draw_rect = (self._draw_rect[0], self._draw_rect[1], xy[0], xy[1]); self._render_view()
+                return True
+            elif et == QtCore.QEvent.Type.MouseButtonRelease and getattr(self, "_draw_rect", None):
+                x0, y0, x1, y1 = self._draw_rect; self._draw_rect = None
+                bx = (int(min(x0, x1)), int(min(y0, y1)), int(max(x0, x1)), int(max(y0, y1)))
+                if bx[2] - bx[0] >= 4 and bx[3] - bx[1] >= 4:        # 太小的忽略（误点）
+                    self._text_boxes.append(bx)
+                    self.status.setText("已补标文字框（共 %d 个）。" % len(self._text_boxes))
+                self._render_view(); return True
+        return super().eventFilter(obj, ev)
 
     def _show_stats(self, stats: dict):
         parts = [stats.get("engine", "?")]
