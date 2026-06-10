@@ -21,26 +21,53 @@ import theme
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
+class _DecomposeWorker(QtCore.QThread):
+    """后台自动拆解：整条 cv2 流水线(background_mask/Canny/connectedComponents/mask_to_sprite)移出主线程，
+    避免 4K 大图 1-3s GUI 硬冻结(原同步跑·事件循环停转·busy 动画转不动)。pieces 是 numpy(跨线程安全)，
+    QImage 转换留主线程做。一次性 QThread(仿 ChatWorker/ModelsWorker)。"""
+    done = QtCore.Signal(object, str)   # pieces(list[np.ndarray]) 或 None, info
+
+    def __init__(self, rgba, tol, parent=None):
+        super().__init__(parent)
+        self._rgba = rgba; self._tol = int(tol)
+
+    def run(self):
+        try:
+            pieces, info = image_ops.auto_decompose(self._rgba, self._tol)
+            self.done.emit(pieces, info)
+        except Exception as e:  # noqa: BLE001 —— 异常回主线程报，不让 QThread 裸崩
+            self.done.emit(None, "自动拆解失败：%s" % e)
+
+
 class SelectionMixin:
     def do_auto_decompose(self):
         if not self.active:
             self._toast("请先选中一个图层（通常是底图）")
             return
+        w = getattr(self, "_decompose_worker", None)
+        if w is not None and w.isRunning():        # 防重入：在途不重发
+            self.op_label.setText("自动拆解：正在进行中，请等本次完成…"); return
         rgba = image_ops.qimage_to_rgba(self.active["image"])
-        # 主线程阻塞的 cv2 操作：只给等待光标（busy 动画无法滚动，因事件循环不转）。
-        # TODO: 要真滚动进度条需把 auto_decompose 挪到 QThread worker（超出本次"点按钮弹进度条"需求）。
+        tol = self.tol_slider.value()
         self.op_label.setText("自动拆解中…")
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
-        try:
-            pieces, info = image_ops.auto_decompose(rgba, self.tol_slider.value())
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()  # 无论拆解成败都复原，不残留 override cursor
+        # 移后台线程(铁律③ 退出在 closeEvent 停)：非模态 busy，事件循环继续转、可继续用其它功能。
+        self._decompose_dialog = self._begin_busy("自动拆解中…（按背景拆成多个元素，大图较慢）", modal=False)
+        self._decompose_worker = _DecomposeWorker(np.ascontiguousarray(rgba), tol, self)
+        self._decompose_worker.done.connect(self._on_decompose_done)
+        self._decompose_worker.start()
+
+    def _on_decompose_done(self, pieces, info):
+        self._end_busy(getattr(self, "_decompose_dialog", None))
+        self._decompose_dialog = None
+        self._decompose_worker = None
         if not pieces:
-            self._toast(info)
-            return
-        for p in pieces:
+            self._toast(info or "未找到独立元素")
+            self.op_label.setText(info or "自动拆解：未找到独立元素"); return
+        for p in pieces:                            # QImage 转换在主线程做（QPixmap/QImage 只主线程建）
             self.assets.append(image_ops.rgba_to_qimage(p))
         self._refresh_assets()
+        if hasattr(self, "asset_tabbar"):           # 切到「抠出素材」页把结果送进视线（对齐 AI 抠图）
+            self.asset_tabbar.setCurrentIndex(1)
         self.op_label.setText(f"自动拆解：{len(pieces)} 个素材已入库")
 
     def do_ai_segment(self):
@@ -92,7 +119,7 @@ class SelectionMixin:
         params = {
             "src_b64": src, "mode": mode, "provider": provider,
             "base_url": base_url, "key": key,
-            "model": model, "timeout": 180, "endpoint": conn["endpoint"] or None,
+            "model": model, "timeout": 300, "endpoint": conn["endpoint"] or None,  # 基础总限时 300s(顶级4K慢)；不够点「+时间」续 60s
             "prompt": conn["prompt"] or None,              # 编辑指令（grsai/ppio；None=默认去背景）
             "result_endpoint": conn["result_endpoint"] or None,  # ppio 异步取结果端点
         }
@@ -102,17 +129,52 @@ class SelectionMixin:
         self._seg_worker._epoch = ep                       # 记 epoch：done 回来时比对，丢弃被取消/被顶替的旧 worker
         self._seg_worker.done.connect(self._on_ai_segment_done)  # 默认连接：worker 在别线程→QueuedConnection→槽在主线程跑
         self.op_label.setText("AI 抠图/拆解中…")            # 底部小字兜底（不删，原则 3）
-        self._seg_dialog = self._begin_busy("AI 抠图/拆解中…（联网调用，约 10 秒~1 分钟，首次较慢）")
+        # 非模态「挂后台」：抠图在后台线程跑，用户可继续用其它功能（源图已在上面 src 快照，后续编辑不影响在途任务）。
+        self._seg_dialog = self._begin_busy(
+            "AI 抠图/拆解中…（联网调用，首次较慢；可继续用其它功能）", extendable=True, modal=False)
         self._seg_dialog.canceled.connect(self._on_seg_cancel)
+        self._seg_dialog.extended.connect(self._on_seg_extend)
         self._seg_worker.start()
+        self._start_seg_countdown()
+
+    def _start_seg_countdown(self):
+        # 秒级倒计时（对齐生图）：让用户看到还剩多久、何时该点「+时间」。worker.remaining() 已含 +时间 延长量。
+        if getattr(self, "_seg_tick", None) is None:
+            self._seg_tick = QtCore.QTimer(self)
+            self._seg_tick.setInterval(500)
+            self._seg_tick.timeout.connect(self._seg_countdown_update)
+        self._seg_countdown_update()
+        self._seg_tick.start()
+
+    def _stop_seg_countdown(self):
+        if getattr(self, "_seg_tick", None) is not None:
+            self._seg_tick.stop()
+
+    def _seg_countdown_update(self):
+        w = self._seg_worker; dlg = self._seg_dialog
+        if w is None or dlg is None or not w.isRunning():
+            self._stop_seg_countdown(); return
+        rem = w.remaining()
+        dlg.detail_label.setText("AI 抠图/拆解中…剩约 %ds（联网，首次较慢；慢可点「+时间」续 60s）" % rem)
+
+    def _on_seg_extend(self):
+        # 「+时间」：给在途抠图 worker 续 60 秒总限时（grsai 流式 / ppio 轮询经 should_cancel 生效），不打断网络。
+        w = self._seg_worker
+        if w is not None and w.isRunning():
+            w.extend(60)
+            self.op_label.setText("AI 抠图：已延长等待 60 秒（剩约 %ds）" % w.remaining())
+            self._seg_countdown_update()   # 立即刷新倒计时（不等下一个 tick）
 
     def _on_seg_cancel(self):
-        # 取消=放弃（abandon），不真正中断网络（seg_client 阻塞式单发，QThread 内无中断点，强杀不安全）。
-        # 自增 epoch 使在途 worker 的 _epoch 失效→其 done 到达时被丢弃。fail-loud：明说后台仍跑完、结果被忽略。
+        # 取消：①给 worker 置 should_cancel（grsai 流式 / ppio 轮询在下个检查点停下，比以前真停得快）；
+        # ②自增 epoch 使在途 worker 的 _epoch 失效→其 done 到达时被丢弃。单发 http urlopen 无中断点 → 仍跑完但被忽略。
+        if self._seg_worker is not None:
+            self._seg_worker.cancel()
+        self._stop_seg_countdown()
         self._end_busy(self._seg_dialog)
         self._seg_dialog = None
         self._seg_epoch += 1
-        self.op_label.setText("AI 抠图：已取消（后台请求仍会跑完，但结果被忽略）")
+        self.op_label.setText("AI 抠图：已取消（grsai/ppio 会尽快停；单发 HTTP 仍跑完但结果被忽略）")
 
     def _update_outline(self):
         # M3: 激活层为空或不可见时，一律不挂轮廓/手柄（防止手柄留在看不见的层上）
@@ -167,8 +229,21 @@ class SelectionMixin:
         img = self.active["image"]
         if not (0 <= x < img.width() and 0 <= y < img.height()):
             return
-        rgba = image_ops.qimage_to_rgba(img)
-        mask = image_ops.magic_wand_mask(rgba, x, y, self.tol_slider.value())
+        # LAB 缓存（按 QImage.cacheKey 失效，单槽位省内存）：同图多次点魔棒省掉每次 cvtColor RGB2LAB(4K ~50-100ms)；
+        # 图变(cacheKey 变)自动重算。点击全程 WaitCursor 让卡顿有反馈（魔棒是高频反复点的工具）。
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            key = img.cacheKey()
+            cache = getattr(self, "_wand_cache", None)
+            if cache and cache[0] == key:
+                rgba, lab = cache[1], cache[2]
+            else:
+                rgba = image_ops.qimage_to_rgba(img)
+                lab = image_ops.rgba_to_lab_int(rgba)
+                self._wand_cache = (key, rgba, lab)
+            mask = image_ops.magic_wand_mask(rgba, x, y, self.tol_slider.value(), lab=lab)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
         if not mask.any():
             self.op_label.setText("魔棒未选中区域（调容差再试）"); return  # 空命中不清已有选区（减选时尤其重要）
         self._set_selection(mask)  # Shift 加 / Alt 减 / 否则当前模式（默认新建·替换）
@@ -376,16 +451,24 @@ class SelectionMixin:
         self._remove_ants()
         if self.selection_mask is None or self.active is None:
             return
+        # 蚂蚁线放【场景顶层】(zValue 9000)而非作激活层子项：子项的 z 是父层级相对的，再高也升不出激活层
+        # 所在的 z 带 → 激活层在下、顶层是不透明大图时，蚂蚁线被顶层完全遮住=用户看不到选区落在自己层上，
+        # 误以为"套索作用在顶层"(用户反馈)。改场景级 + 把激活层 sceneTransform 烘焙进路径项 → 浮在所有图层之上；
+        # 选区轮廓留在画布空间(移动图层时不跟着跑，与 PS 选区框一致)。坐标系=激活层局部，故 path 不变只设 transform。
         path = self._mask_to_path(self.selection_mask)
         item = self.active["item"]
-        base = QtWidgets.QGraphicsPathItem(path, item)
+        xf = item.sceneTransform()
+        base = QtWidgets.QGraphicsPathItem(path)
+        base.setTransform(xf)
         pw = QtGui.QPen(QtGui.QColor("#ffffff"), 0); pw.setCosmetic(True)
         base.setPen(pw); base.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        base.setZValue(60); base.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
-        ants = QtWidgets.QGraphicsPathItem(path, item)
+        base.setZValue(9000); base.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        ants = QtWidgets.QGraphicsPathItem(path)
+        ants.setTransform(xf)
         pb = QtGui.QPen(QtGui.QColor("#000000"), 0); pb.setCosmetic(True); pb.setDashPattern([4, 4])
         ants.setPen(pb); ants.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-        ants.setZValue(61); ants.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        ants.setZValue(9001); ants.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.scene.addItem(base); self.scene.addItem(ants)
         self._ants_base = base; self._ants = ants
         self._ants_timer.start(80)
 
@@ -455,7 +538,7 @@ class SelectionMixin:
         if layer not in self.layers:
             return
         if layer.get("kind") == "vector":  # 矢量层无像素 → 无法载入为选区（fail-loud）
-            self.op_label.setText("矢量层没有像素，无法载入为选区"); return
+            self.op_label.setText("矢量层无像素，无法载入为选区（用移动/锚点工具直接编辑，或右键该层→栅格化为像素层）"); return
         if mode == "new":
             self._set_active(layer)  # 激活该层（会清选区），选区=它自己的不透明像素（本层坐标）
             m = (image_ops.qimage_to_rgba(layer["image"])[:, :, 3] > 8).astype(np.uint8) * 255

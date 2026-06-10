@@ -219,12 +219,20 @@ class ProgressSheet(QtWidgets.QDialog):
     """Compact in-product progress sheet for batch jobs with real progress."""
 
     canceled = QtCore.Signal()
+    extended = QtCore.Signal()   # 「+时间」点击：联网任务续时（对齐生图任务行的 +时间）
 
-    def __init__(self, title: str, detail: str, total: int, parent=None, cancelable: bool = True):
+    def __init__(self, title: str, detail: str, total: int, parent=None, cancelable: bool = True,
+                 extendable: bool = False, modal: bool = True):
         super().__init__(parent)
         self.setObjectName("progressSheet")
         self.setWindowTitle(title)
-        self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        if modal:
+            self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        else:
+            # 非模态「挂后台」：不挡编辑器，用户可继续用其它功能；置顶 + 小工具窗，倒计时/「+时间」始终可见可点。
+            self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+            self.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+            self.setWindowFlag(QtCore.Qt.WindowType.Tool, True)
         self.setMinimumWidth(420)
         self._canceled = False
         self._total = max(0, int(total))
@@ -258,6 +266,11 @@ class ProgressSheet(QtWidgets.QDialog):
         self.counter_label = QtWidgets.QLabel("0 / %d" % self._total)
         self.counter_label.setObjectName("progressCounter")
         foot.addWidget(self.counter_label, 1)
+        self.extend_btn = QtWidgets.QPushButton("+时间")
+        self.extend_btn.setToolTip("联网较慢/大图时延长等待，避免超时白跑（每次 +60 秒）")
+        self.extend_btn.setVisible(extendable)
+        self.extend_btn.clicked.connect(self.extended.emit)
+        foot.addWidget(self.extend_btn)
         self.cancel_btn = QtWidgets.QPushButton("取消")
         self.cancel_btn.setVisible(cancelable)
         self.cancel_btn.clicked.connect(self.cancel)
@@ -590,6 +603,8 @@ class LayerRow(QtWidgets.QWidget):
         section = QtGui.QAction("编辑", m); section.setEnabled(False); m.addAction(section)
         m.addAction(icons.tool_icon("adjust", c["text"], 16), "亮度 / 对比度…", ed.brightness_contrast_dialog)
         m.addAction(icons.tool_icon("text", c["text"], 16), "重命名…", lambda: ed._rename_layer(layer))
+        if layer.get("kind") == "vector":  # 矢量层 → 像素副本（对标 Illustrator 栅格化），供魔棒/套索/像素画笔用
+            m.addAction(icons.tool_icon("adjust", c["text"], 16), "栅格化为像素层（副本）", lambda: ed._rasterize_vector_layer(layer))
         m.addSeparator()
         section = QtGui.QAction("分组", m); section.setEnabled(False); m.addAction(section)
         act_mark = m.addAction("取消勾选打组" if self._marked else "勾选以打组")
@@ -1598,6 +1613,10 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if w is not None and w.isRunning():
             if not w.wait(3000):
                 w.terminate(); w.wait(1000)
+        dw = getattr(self, "_decompose_worker", None)   # 自动拆解后台 worker（同 SegWorker 坑：销毁仍 run 硬崩，铁律③）
+        if dw is not None and dw.isRunning():
+            if not dw.wait(3000):
+                dw.terminate(); dw.wait(1000)
         # 退出前停 图像描摹 面板的常驻 QThread：面板装在 FloatingToolWindow 里，其 closeEvent 只 hide 不 close，
         # 面板自身 closeEvent 永不触发 → 线程不停被销毁会硬崩（与 SegWorker 同坑，铁律③）。显式调 stop_thread。
         tp = getattr(self, "_trace_panel", None)
@@ -2409,9 +2428,14 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         sl.addWidget(b_grabcut)
         b_aiseg = QtWidgets.QPushButton("AI 抠图/拆解（彩色复杂图）")
         b_aiseg.setIcon(icons.tool_icon("star", theme.colors()["accent"], 16))
-        b_aiseg.setToolTip("用 AI 分割后端抠出前景/拆成多个元素，结果入素材库；适合魔棒拆不动的彩色 biorender 图。需先在弹出设置里配置后端")
+        b_aiseg.setToolTip("用 AI 分割后端抠出前景/拆成多个元素，结果入素材库；适合魔棒拆不动的彩色 biorender 图。\n"
+                           "去背景=整张透明前景；拆解多元素=AI去背景后本地按连通域拆成多个独立素材。需先在弹出设置里配置后端")
         b_aiseg.clicked.connect(self.do_ai_segment)
         sl.addWidget(b_aiseg)
+        # 选哪个：写实图（球棍/渐变/照片）用抠图保真；扁平图标/线稿用「图像描摹」转矢量更锐利可编辑。
+        sl.addWidget(self._hint("💡 选哪个：3D 写实图（球棍/渐变/照片）→ 用「抠图/拆解」保真出 PNG；\n"
+                                "    扁平图标/线稿 → 用「图像描摹」转矢量(SVG)更锐利、可改色/改节点。\n"
+                                "    （写实图描摹会变扁平发糊——那是矢量格式的局限，不是 bug）"))
         sl.addWidget(self._hint("起选区：套索/选区画笔涂 · 魔棒按颜色点 · Ctrl 点图层=载入该层为选区。\n"
                                 "连续精修：套索/选区画笔/魔棒 按 Shift 加选 / Alt 减选（Ctrl+Shift/Ctrl+Alt 点图层=加/减该层）。\n"
                                 "Esc 取消 · Ctrl+Shift+D 重新选择 · 选区→加入素材库 / Ctrl+J 抠到新图层。"))
@@ -2941,10 +2965,13 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self._toast_timer.start(timeout_ms)
 
     # ---------- 可复用忙碌进度面板（indeterminate；项目内统一样式）----------
-    def _begin_busy(self, label: str, cancelable: bool = True) -> ProgressSheet:
+    def _begin_busy(self, label: str, cancelable: bool = True, extendable: bool = False,
+                    modal: bool = True) -> ProgressSheet:
         # 不确定进度（联网单发请求，无逐张进度）→ ProgressSheet(0,0) busy 无限滚动条。
-        # 模态盖住编辑区但事件循环继续转（busy 动画活、worker done 跨线程信号仍回主线程）。
-        dlg = ProgressSheet("请稍候", label, 0, self, cancelable)
+        # modal=True：盖住编辑区（事件循环继续转，busy 动画活、worker done 跨线程信号仍回主线程）。
+        # modal=False：「挂后台」非模态，用户可继续用其它功能（AI 抠图——源图已在提交时快照，后续编辑不影响在途任务）。
+        # extendable=True → 显示「+时间」（联网慢/大图续时，避免硬超时白跑，对齐生图）。
+        dlg = ProgressSheet("请稍候", label, 0, self, cancelable, extendable=extendable, modal=modal)
         dlg.counter_label.setText("处理中")
         dlg.show()
         QtWidgets.QApplication.processEvents()  # 保证这一帧就画出来
@@ -3428,6 +3455,26 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             out.extend(self._layer_items(l))
         return out
 
+    def _snap_item_rects(self):
+        """磁吸候选元素的外框几何 (item, left, cx, right, top, cy, bottom)，~200ms 自愈缓存。
+        每帧拖动都重扫全部 item 的 sceneBoundingRect 是 O(N) 卡顿根因（描摹产出数百~上千独立 path item）；
+        拖动中其它 item 不动 → 缓存有效，把扫描从每帧降到 ~200ms 一次。item 增删(count 变)即重建；≤200ms 自愈，
+        不改磁吸语义（被拖 item 自身缓存几何虽旧但调用方按 `other is item` 跳过，不影响）。"""
+        items = self._all_drag_items()
+        clk = getattr(self, "_snap_cache_clock", None)
+        cache = getattr(self, "_snap_rects_cache", None)
+        if not (cache is not None and clk is not None and clk.elapsed() < 200 and cache[0] == len(items)):
+            data = []
+            for it in items:
+                r = it.sceneBoundingRect()
+                data.append((it, r.left(), r.center().x(), r.right(), r.top(), r.center().y(), r.bottom()))
+            cache = (len(items), data)
+            self._snap_rects_cache = cache
+            if clk is None:
+                clk = QtCore.QElapsedTimer(); self._snap_cache_clock = clk
+            clk.restart()
+        return cache[1]
+
     def _snap_drag_pos(self, item, new_pos: QtCore.QPointF) -> QtCore.QPointF:
         """统一磁吸：把【正在拖的任意元素】（栅格层/形状/箭头/文字/抠图/AI拆解/素材…）外框的
         左/中/右、上/中/下 吸到 其它元素 + 画布边·中线 + 参考线 + 网格。命中画洋红对齐线（AI/PS 式）。"""
@@ -3442,13 +3489,12 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         targets_x += [(0.0, (0.0, ch)), (cw / 2.0, (0.0, ch)), (cw, (0.0, ch))]
         targets_y = [(y, (0.0, cw)) for y in self.view._guides_h]
         targets_y += [(0.0, (0.0, cw)), (ch / 2.0, (0.0, cw)), (ch, (0.0, cw))]
-        for other in self._all_drag_items():  # 其它每个元素的 左/中/右、上/中/下
-            if other is item:
-                continue
-            r = other.sceneBoundingRect()
-            sv = (r.top(), r.bottom()); sh = (r.left(), r.right())
-            targets_x += [(r.left(), sv), (r.center().x(), sv), (r.right(), sv)]
-            targets_y += [(r.top(), sh), (r.center().y(), sh), (r.bottom(), sh)]
+        for other, lf, cx, rt, tp, cyv, bt in self._snap_item_rects():  # 其它每个元素的 左/中/右、上/中/下（缓存几何）
+            if other is item or other.isSelected():   # 跳过被拖 item + 所有选中 item(多选整组拖时它们一起动，
+                continue                               # 缓存几何是拖动前旧位置，不跳会吸到"幽灵"位置)；不影响单拖
+            sv = (tp, bt); sh = (lf, rt)
+            targets_x += [(lf, sv), (cx, sv), (rt, sv)]
+            targets_y += [(tp, sh), (cyv, sh), (bt, sh)]
         nl = new_pos.x() + off.x(); nt = new_pos.y() + off.y()
         guides = []; ndx = ndy = 0.0
         best = None
@@ -3721,6 +3767,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
     # do_ai_segment / _on_seg_cancel 已抽到 editor_selection.SelectionMixin。
 
     def _on_ai_segment_done(self, cutouts, err):
+        self._stop_seg_countdown()                         # 停倒计时（成功/失败/空/取消/epoch 失配都要停）
         self._end_busy(self._seg_dialog)                   # 无条件关弹窗：成功/失败/空/取消/epoch 失配都要关（原则 12）
         self._seg_dialog = None
         sender = self.sender()
@@ -3737,17 +3784,42 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if not cutouts:
             self.op_label.setText("AI 抠图：后端未返回元素")
             return
+        # 「拆解多元素」=AI 去背景(已透明)→本地按 alpha 连通域真正拆成多个独立素材（生成式模型本身做不到拆解）。
+        # 「去背景」=保留整张透明前景，不拆。
+        split = (getattr(self, "_seg_mode", "") == "elements")
         n = 0
+        n_split = 0
         for b64 in cutouts:
             img = self._b64_to_qimage(b64)
             if img is None or img.isNull():  # 大声失败：跳过无效，计数
                 continue
+            if split:
+                try:
+                    import image_ops
+                    pieces = image_ops.split_by_alpha(image_ops.qimage_to_rgba(img))
+                except Exception:  # noqa: BLE001 —— 拆分失败退回整图，不中断
+                    pieces = []
+                if len(pieces) >= 2:                  # 真拆出多个元素 → 各自入库
+                    for p in pieces:
+                        self.assets.append(image_ops.rgba_to_qimage(p))
+                        n += 1
+                    n_split += 1
+                    continue
+                # 只连成一块（背景不够干净/本就一个主体）→ 退回整图（fail-loud 由下方提示）
             self.assets.append(img)  # _b64_to_qimage 已转 ARGB32_Premultiplied，无需重复转换
             n += 1
         self._refresh_assets()
-        skipped = len(cutouts) - n
-        self.op_label.setText("AI 抠图/拆解：%d 个素材已入库%s" % (
-            n, ("（跳过 %d 张无效）" % skipped) if skipped else ""))  # 报跳过数（原则 12 Fail Loud）
+        # 等了 10-30s 的长异步抠图完成 → 切到「抠出素材」页(index 1)把结果送进视线，否则落在隐藏页用户以为失败。
+        if n > 0 and hasattr(self, "asset_tabbar"):
+            self.asset_tabbar.setCurrentIndex(1)
+        skipped = len(cutouts) - n if not split else 0
+        if split and n_split == 0:
+            tip = "（拆解模式但只得到整块：背景可能没抠净，已入整图；可重试或改用本地「自动拆解」）"
+        elif split:
+            tip = "（已按元素拆分）"
+        else:
+            tip = ("（跳过 %d 张无效）" % skipped) if skipped else ""
+        self.op_label.setText("AI 抠图/拆解：%d 个素材已入库%s" % (n, tip))  # 报跳过/拆分数（原则 12 Fail Loud）
 
     # ---------- 图层打组 / 解组（视图层分组，移植 layers.js）----------
     # _toggle_mark 已抽到 editor_layers.LayersMixin。
@@ -4322,7 +4394,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             self._toast("选区作用在图层上：请先选中或新建一个图层")
             return False
         if self.active.get("kind") == "vector":  # 矢量层无像素 → 选区/魔棒不适用（fail-loud，不静默崩）
-            self._toast("矢量层没有像素，魔棒/套索/选区工具需要栅格图层")
+            self._toast("矢量层用[移动]工具点选元素改色/拖动、[锚点]工具改节点；要用魔棒/套索请先右键该层→栅格化为像素层")
             return False
         return True
 
@@ -4530,13 +4602,21 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
         form.addRow(bb)
 
+        # 拖滑块防抖（对齐 IHC _thr_timer 40ms）：valueChanged 只即时刷标签 + 重启定时器；到点才跑全图重算。
+        # 否则每帧 valueChanged 都在主线程同步跑 adjust_brightness_contrast(全幅 float32)，4K(~6700万像素)拖动卡死。
+        _prev_timer = QtCore.QTimer(dlg); _prev_timer.setSingleShot(True); _prev_timer.setInterval(40)
+
         def apply_preview():
-            b_lbl.setText(f"{b_slider.value():+d}"); c_lbl.setText(f"{c_slider.value():+d}")
             out = image_ops.adjust_brightness_contrast(orig_rgba, b_slider.value(), c_slider.value())
             img = image_ops.rgba_to_qimage(out)
             layer["image"] = img; layer["item"].set_image(img)  # 仅刷新显示，不入历史
-        b_slider.valueChanged.connect(lambda _: apply_preview())
-        c_slider.valueChanged.connect(lambda _: apply_preview())
+        _prev_timer.timeout.connect(apply_preview)
+
+        def _on_slide(_=0):
+            b_lbl.setText(f"{b_slider.value():+d}"); c_lbl.setText(f"{c_slider.value():+d}")  # 标签即时（廉价）
+            _prev_timer.start()                                                                # 重活防抖
+        b_slider.valueChanged.connect(_on_slide)
+        c_slider.valueChanged.connect(_on_slide)
 
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             b, c = b_slider.value(), c_slider.value()
@@ -4746,6 +4826,25 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             for it in hidden:
                 it.setVisible(True)
         return img
+
+    def _rasterize_vector_layer(self, layer):
+        """矢量层 → 像素副本层（对标 Illustrator 栅格化）：保留原矢量层，另建栅格层，供魔棒/套索/像素画笔用。"""
+        if layer.get("kind") != "vector":
+            return
+        items = list(layer.get("items") or [])
+        if not items and layer.get("item") is not None:
+            items = [layer["item"]]
+        rect = QtCore.QRectF()
+        for it in items:
+            rect = rect.united(it.sceneBoundingRect())
+        img = self._render_layer_image(layer)
+        if img is None or img.isNull() or rect.width() < 1:
+            self._toast("栅格化失败：该层无可渲染内容"); return
+        self._push_history("栅格化矢量层")
+        new = self._add_layer(img.convertToFormat(QtGui.QImage.Format.Format_ARGB32_Premultiplied),
+                              f"{layer.get('name', '矢量')} 栅格", "image")
+        new["item"].setPos(rect.topLeft())   # 摆回原矢量层所在位置
+        self._toast(f"已栅格化为像素层（{img.width()}×{img.height()}），原矢量层保留 · 现在可用魔棒/套索/像素画笔")
 
     def _ai_place_b64(self, b64: str, push: bool = True):
         """AI 结果 base64 落到画布：无图层→作底图；已有内容→作可移动图层(≤55%居中)。返回 layer 或 None。

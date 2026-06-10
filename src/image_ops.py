@@ -9,15 +9,21 @@ import numpy as np
 
 
 # ---------- 纯 numpy/cv2 算法（无需 Qt，可 headless 计时）----------
-def magic_wand_mask(rgba: np.ndarray, x: int, y: int, tol: int) -> np.ndarray:
+def rgba_to_lab_int(rgba: np.ndarray) -> np.ndarray:
+    """RGBA/RGB → int32 LAB（L/a/b 各 0-255）。供魔棒缓存复用：同图多次点魔棒省掉每次 cvtColor 重算。"""
+    return cv2.cvtColor(np.ascontiguousarray(rgba[:, :, :3]), cv2.COLOR_RGB2LAB).astype(np.int32)
+
+
+def magic_wand_mask(rgba: np.ndarray, x: int, y: int, tol: int, lab: np.ndarray = None) -> np.ndarray:
     """从 (x,y) 选相近颜色的连续区域 → 二值掩码 (H,W) uint8（255=选中）。
     度量从逐通道 RGB L2 升级为 LAB ΔE76 感知色距（cv2 8bit LAB：L/a/b 均 0-255，a/b 偏移 128），
     对半透明/渐变背景比 RGB 更稳——LAB 感知均匀，同样的容差不会沿渐变一路爬出。
     保留两条核心语义不变：候选 = 与【种子固定参考色】的色距 ≤ 阈值（非逐通道 L∞、非浮动范围）；
     再取含种子的 4 连通分量（"连续区域"语义）。容差 tol(0-255 滑块) 直接作 ΔE 阈值（不再 ·3，
-    LAB 各通道与 tol 同量级 0-255）。"""
+    LAB 各通道与 tol 同量级 0-255）。lab 传入则复用（魔棒缓存：同图多次点省 cvtColor），否则现算。"""
     h, w = rgba.shape[:2]
-    lab = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2LAB).astype(np.int32)  # L/a/b 各 0-255
+    if lab is None:
+        lab = rgba_to_lab_int(rgba)  # L/a/b 各 0-255
     seed_lab = lab[int(y), int(x)]
     de = float(tol)                                                    # ΔE76 阈值 = 滑块容差
     cand = (((lab - seed_lab) ** 2).sum(axis=2) <= de * de).astype(np.uint8)  # 与固定 seed 比 LAB 欧氏(≈ΔE76)
@@ -316,6 +322,30 @@ def auto_decompose(rgba: np.ndarray, tol: int = 36, min_blob_frac: float = 0.000
             info = "找到的块都太小被过滤（碎片/文字）：背景可能非纯色，建议调高容差，或改用 GrabCut/AI 抠图"
         return out, info
     return out, ""
+
+
+def split_by_alpha(rgba: np.ndarray, min_blob_frac: float = 0.0008, feather: float = 1.0,
+                   max_pieces: int = 200, close_k: int = 5):
+    """把【已透明背景】的 RGBA 按 alpha 连通域拆成多个独立元素 sprite（AI 去背景后本地拆分用）。
+
+    用于「AI 去背景 + 本地拆分」：grsai 先把整图干净去背景→透明，再用本函数按 alpha 连通块拆成
+    protein/ligand/圈 等独立透明素材（grsai 生成式模型本身做不到拆解）。close_k 闭运算桥接同一元素内
+    抗锯齿细缝/断点，避免一个分子被拆成一堆碎原子；mask_to_sprite 仍乘【原始 alpha】，故 close 只分组、
+    不会把透明缝填成背景色。返回 pieces_list（按面积大→小，已裁到各自外接框的透明 RGBA）。"""
+    h, w = rgba.shape[:2]
+    fg = (rgba[:, :, 3] > 24).astype(np.uint8)
+    if close_k >= 3:
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((close_k, close_k), np.uint8))
+    min_area = max(150, int(w * h * min_blob_frac))
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+    comps = sorted([(i, int(stats[i, cv2.CC_STAT_AREA])) for i in range(1, num)
+                    if stats[i, cv2.CC_STAT_AREA] >= min_area], key=lambda t: -t[1])
+    out = []
+    for lab, _ in comps[:max_pieces]:
+        sprite = mask_to_sprite(rgba, (labels == lab), erode=False, feather=feather)
+        if sprite is not None:
+            out.append(sprite[0])
+    return out
 
 
 def split_montage(rgba: np.ndarray, bg_tol: int = 20, min_gap: int = 0,

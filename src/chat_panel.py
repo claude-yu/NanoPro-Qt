@@ -559,4 +559,9 @@ class ChatPanel(QtWidgets.QWidget):
     def _stop(self):
         if self._worker:
             self._worker.stop()
-            self._set_status("停止中…")
+            # 立即恢复 UI（不等 _on_done）：服务端推流后久不吐字节时，should_cancel 救不了正阻塞的 socket 读，
+            # 若等 _on_done 才恢复，发送键会卡在「停止中…」体感像死了。worker 后台跑完会被 _send 的在途守卫挡住重叠。
+            self.btn_send.setEnabled(True); self.btn_stop.setVisible(False)
+            if hasattr(self, "_delta_timer"):
+                self._delta_timer.stop()
+            self._set_status("已停止（后台请求会尽快结束）")

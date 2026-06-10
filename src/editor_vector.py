@@ -377,7 +377,19 @@ class VectorMixin:
         items = self._selected_velem_items()
         if not items:
             self._set_vec_controls_enabled(False)
+            self._last_vec_sel_empty = True
             return
+        # 「空选中→非空选中」跃迁 → 把「矢量属性」面板顶到前台（对齐 PS/AI「选中对象即弹属性面板」，
+        # 修「选了矢量元素但改色/改描边入口躺在被盖住的 tab 里、用户以为不能改色」）。仅在跃迁时顶，
+        # 不每次 selectionChanged 都顶——否则矢量层内反复框选会抢 tab、用户手动切到图层被反复顶回。
+        if getattr(self, "_last_vec_sel_empty", True) and hasattr(self, "_dw_vec"):
+            try:
+                if self._dw_vec.isClosed():
+                    self._dw_vec.toggleView(True)
+                self._dw_vec.setAsCurrentTab()
+            except Exception:  # noqa: BLE001 —— 面板顶置失败不影响选中/回填
+                pass
+        self._last_vec_sel_empty = False
         self._suspend_vec_sel = True  # 回填控件 → 抑制其 valueChanged/toggled 回写选中 item
         try:
             self._set_vec_controls_enabled(True)
@@ -900,6 +912,10 @@ class VectorMixin:
         if ov is None:
             return
         if ov["drag_pushed"]:
+            t = getattr(self, "_node_refresh_timer", None)   # 松手：先把节流尾帧强制落终值(target.path 到位)再 commit，
+            if t is not None and t.isActive():               # 否则最后一次 move 落在 16ms 窗口、尾帧未触发就 commit，
+                t.stop()                                     # 会把缺最后亚-16ms 位移的旧 path 灌进 VElem/撤销快照
+            self._apply_node_refresh()
             self._commit_node_edit()
         ov["drag_pushed"] = False
 
@@ -939,8 +955,7 @@ class VectorMixin:
             a.cin = (a.cin[0] + dx, a.cin[1] + dy)
         if a.cout is not None:
             a.cout = (a.cout[0] + dx, a.cout[1] + dy)
-        target.setPath(svg_io.anchors_to_path(ov["subpaths"]))
-        self._refresh_node_overlay_positions()
+        self._throttled_node_refresh()
 
     def _on_ctrl_handle_dragged(self, handle, scene_pos):
         # 拖控制柄：改 Anchor.cin/cout。平滑点联动对侧柄共线反向；角点独立。
@@ -971,8 +986,40 @@ class VectorMixin:
                         a.cin = mirror
                     else:
                         a.cout = mirror
-        target.setPath(svg_io.anchors_to_path(ov["subpaths"]))
+        self._throttled_node_refresh()
+
+    def _apply_node_refresh(self):
+        """把当前锚点模型重建成 path + 刷新 overlay 柄/连线（拖动节流的实际执行体）。"""
+        ov = self._node_overlay
+        if ov is None:
+            return
+        ov["target"].setPath(svg_io.anchors_to_path(ov["subpaths"]))
         self._refresh_node_overlay_positions()
+        clk = getattr(self, "_node_drag_clock", None)
+        if clk is not None:
+            clk.restart()
+
+    def _throttled_node_refresh(self):
+        """锚点/控制柄拖动视觉刷新节流 ~16ms（模型 a.on/cin/cout 已在调用方每帧即时更新，语义不变；
+        只把 O(锚点数) 的 setPath+overlay 重摆限到 ≤60fps，避免上百锚点复杂 path 拖锚发滞）。
+        尾帧用 singleShot 兜底 → 松手后视觉一定到位（不需 release 钩子）。"""
+        ov = self._node_overlay
+        if ov is None:
+            return
+        clk = getattr(self, "_node_drag_clock", None)
+        if clk is None:
+            clk = QtCore.QElapsedTimer(); clk.start(); self._node_drag_clock = clk
+            self._apply_node_refresh(); return
+        if clk.elapsed() >= 16:
+            self._apply_node_refresh()
+        else:
+            t = getattr(self, "_node_refresh_timer", None)
+            if t is None:
+                t = QtCore.QTimer(self.view); t.setSingleShot(True)
+                t.timeout.connect(self._apply_node_refresh)
+                self._node_refresh_timer = t
+            if not t.isActive():
+                t.start(16)
 
     def _refresh_node_overlay_positions(self):
         # 拖动中只更新已有 overlay item 的位置（不增删，避免悬空）。柄结构未变（增删锚才重建）。
