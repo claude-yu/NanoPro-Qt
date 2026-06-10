@@ -1,10 +1,10 @@
 ; Inno Setup 脚本：把 dist\NanoPro 打成双击即装的 setup.exe（开始菜单快捷方式 + 卸载程序）。
 ; 编译： "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" NanoPro_Setup.iss
-; 产物： Output\SciEdit_NanoPro_Setup_v1.17.exe
+; 产物： Output\SciEdit_NanoPro_Setup_v1.18.exe
 
 #define MyAppName "SciEdit 科研图编辑器"
 #define MyAppExeName "NanoPro.exe"
-#define MyAppVersion "1.17"
+#define MyAppVersion "1.18"
 #define MyAppPublisher "NanoPro"
 
 [Setup]
@@ -21,7 +21,7 @@ DefaultGroupName=SciEdit NanoPro
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 OutputDir=Output
-OutputBaseFilename=SciEdit_NanoPro_Setup_v1.17
+OutputBaseFilename=SciEdit_NanoPro_Setup_v1.18
 SetupIconFile=NanoPro.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
