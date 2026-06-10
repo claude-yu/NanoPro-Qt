@@ -204,6 +204,97 @@ def set_gen_models(pid, models) -> bool:
     return _save_config(cfg)
 
 
+# 提示词预设分类（用户可归类；只保留少量通用类别，绝大多数交用户自建）。
+PROMPT_PRESET_CATS = ["通用", "优化", "配色", "风格", "标注"]
+
+# 内置只保留【一个通用基础预设】（英文——nano-banana/gpt-image 等模型对英文提示词响应更好）。
+# 其余全交用户自己建/导入（对齐用户要求：内置别太多）。
+_BUILTIN_PROMPT_PRESETS = [
+    {"name": "通用基础", "category": "通用",
+     "text": "clean scientific illustration, white background, clear and readable labels, "
+             "high quality, sharp edges, consistent color palette, no watermark"},
+]
+
+
+def prompt_presets_path() -> Path:
+    """用户提示词预设的【独立 JSON 文件】路径（对齐大香蕉独立预设文件）：~/.sciedit/prompt_presets.json。
+    用户可直接把此文件复制到别处/拷给别人复用，也可经 UI 导入。"""
+    return Path.home() / ".sciedit" / "prompt_presets.json"
+
+
+def _load_user_presets() -> list:
+    try:
+        p = prompt_presets_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:  # noqa: BLE001 —— 文件损坏/无法读 → 当空，不崩
+        pass
+    return []
+
+
+def _save_user_presets(lst) -> bool:
+    try:
+        p = prompt_presets_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(lst, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def get_prompt_presets() -> list:
+    """提示词预设 = 1 个内置通用基础 + 用户存的（独立文件 ~/.sciedit/prompt_presets.json）。
+    返回 [{name,text,category,builtin}]，内置在前。"""
+    out = [dict(p, builtin=True) for p in _BUILTIN_PROMPT_PRESETS]
+    for p in _load_user_presets():
+        if isinstance(p, dict) and p.get("name") and (p.get("text") or p.get("content")):
+            out.append({"name": str(p["name"]), "text": str(p.get("text") or p.get("content")),
+                        "category": str(p.get("category") or "通用"), "builtin": False})
+    return out
+
+
+def add_prompt_preset(name, text, category="通用") -> bool:
+    """保存一条用户提示词预设到独立 JSON 文件（同名覆盖）。可存对话 AI 给的提示词复用。"""
+    name = str(name).strip(); text = str(text).strip()
+    if not name or not text:
+        return False
+    user = [p for p in _load_user_presets() if p.get("name") != name]  # 同名覆盖
+    user.append({"name": name, "text": text, "category": str(category or "通用")})
+    return _save_user_presets(user)
+
+
+def delete_prompt_preset(name) -> bool:
+    """删除一条用户提示词预设（内置的删不掉，UI 侧拦截）。"""
+    return _save_user_presets([p for p in _load_user_presets() if p.get("name") != str(name)])
+
+
+def import_prompt_presets(items, replace=False) -> int:
+    """导入提示词预设（兼容大香蕉 title/content 字段）。replace=True 覆盖全部用户预设，否则按名合并去重。
+    返回成功导入条数。"""
+    cur = [] if replace else list(_load_user_presets())
+    by_name = {p.get("name"): p for p in cur if isinstance(p, dict)}
+    n = 0
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or it.get("title") or "").strip()
+        text = str(it.get("text") or it.get("content") or "").strip()
+        if not name or not text:
+            continue
+        by_name[name] = {"name": name, "text": text, "category": str(it.get("category") or "通用")}
+        n += 1
+    _save_user_presets(list(by_name.values()))
+    return n
+
+
+def export_prompt_presets() -> list:
+    """导出【用户】提示词预设（不含内置）为可写 JSON 的列表。"""
+    return [{"name": p.get("name"), "text": str(p.get("text") or p.get("content") or ""),
+             "category": p.get("category", "通用")}
+            for p in _load_user_presets() if isinstance(p, dict) and p.get("name")]
+
+
 def get_style_lib():
     """返回已记住的图生图参考图库目录（外部图包/用户自备目录）；未设或已失效返回 None。"""
     cfg = _load_config()

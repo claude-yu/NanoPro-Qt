@@ -252,9 +252,9 @@ def generate_image(prompt, key, base_url, ref_b64=None, resolution="2K", ratio="
         return {"error": "请求失败：%s" % e}
     if not img_url:
         return {"error": "grsai 未返回图片 URL（status=%s）" % last_status}
-    try:  # python 下载结果图 → base64
+    try:  # python 下载结果图 → base64（180s：4K 顶级图较大、走 VPN/国外节点下载慢，120s 易掐断）
         ireq = urllib.request.Request(img_url, headers={"User-Agent": headers["User-Agent"]})
-        with urllib.request.urlopen(ireq, timeout=120, context=_SSL) as ir:
+        with urllib.request.urlopen(ireq, timeout=180, context=_SSL) as ir:
             return {"b64": base64.b64encode(ir.read()).decode("ascii")}
     except Exception as e:
         return {"error": "下载结果图失败：%s" % e}

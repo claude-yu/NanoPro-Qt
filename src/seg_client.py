@@ -31,9 +31,9 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 # —— 面板用的下拉常量（仿 ai_client.MODELS/NODES）——
 SEG_MODES = [
-    ("foreground", "去背景（抠出主要前景，单张）"),
-    # 多元素拆解需后端真正支持(SAM 类)；普通 image-edit/去背景中转通常只回整图变体，本地拆解请用「自动拆解」。
-    ("elements",   "拆解多元素（取决于后端，普通中转常只回整图变体）"),
+    ("foreground", "去背景（抠出主要前景·透明·单张）"),
+    # 生成式后端做不到真拆解 → 本管线=AI 干净去背景(透明) + 本地按 alpha 连通域拆成多个独立元素素材。
+    ("elements",   "拆解多元素（AI去背景 + 本地按连通域拆成多个独立素材）"),
 ]
 SEG_PROVIDERS = [
     ("grsai",  "grsai 图生图编辑（复用已配置的 grsai，去背景/编辑·出整图）"),
@@ -201,26 +201,95 @@ def _segment_http(b64, mode, base_url, key, model, timeout, extra=None, endpoint
     return {"cutouts": cutouts}
 
 
-def _segment_grsai(b64, prompt, base_url, key, model, timeout=180) -> dict:
+# nano-banana / gpt-image 通用标准比例 → 取与源图最接近的，让抠图输出比例匹配原图（用户反馈：默认 1:1 把宽图压方了）
+_STD_RATIOS = {
+    "1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4, "3:2": 3 / 2, "2:3": 2 / 3,
+    "16:9": 16 / 9, "9:16": 9 / 16, "5:4": 5 / 4, "4:5": 4 / 5, "21:9": 21 / 9, "9:21": 9 / 21,
+}
+
+
+def _nearest_ratio_from_b64(b64) -> str:
+    """解码源图取宽高 → 最接近的标准比例串（如 '5:4'）。解不出 → 'auto'（交模型保留输入比例，不强压 1:1）。"""
+    try:
+        import io
+        from PIL import Image
+        raw = base64.b64decode(_strip_data_url_local(b64))
+        w, h = Image.open(io.BytesIO(raw)).size
+        if w <= 0 or h <= 0:
+            return "auto"
+        ar = w / float(h)
+        return min(_STD_RATIOS.items(), key=lambda kv: abs(kv[1] - ar))[0]
+    except Exception:  # noqa: BLE001 —— 解码/PIL 任何异常 → auto，绝不因取比例失败而中断抠图
+        return "auto"
+
+
+def _strip_data_url_local(b64: str) -> str:
+    s = (b64 or "").strip()
+    return s.split(",", 1)[1] if (s.startswith("data:") and "," in s) else s
+
+
+def _clean_cutout_alpha(b64) -> str:
+    """让生成式去背景结果【可靠透明】：两种情形都处理，保住内部白内容(白 H 原子/圆圈内白底)与彩色块。
+
+    生成式抠图(grsai/nano-banana)结果不稳定：① 有 alpha 但残留半透明白雾；② 干脆返回不透明白底(无 alpha)。
+    - 情形①(有透明)：雾 = 近白(min>=210)且非全不透明(alpha<240) ∪ 极淡(alpha<60) → 全透明。
+    - 情形②(基本不透明)：把【连到图像边界】的近白(min>=230) flood 成透明（=去外层白背景）；内部白(H原子/圆圈白底)
+      不连边界 → 保留。彩色(min 远<阈)一律不动。
+    """
+    try:
+        import io
+        import numpy as np
+        import cv2
+        from PIL import Image
+        im = Image.open(io.BytesIO(base64.b64decode(_strip_data_url_local(b64)))).convert("RGBA")
+        a = np.asarray(im).copy()
+        alpha = a[..., 3]
+        rgbmin = a[..., :3].min(axis=2)
+        if float((alpha < 200).mean()) < 0.02:           # 情形②：基本不透明（模型返回白底）→ 边界连通近白键出
+            nw = (rgbmin >= 230).astype(np.uint8)
+            num, lbl = cv2.connectedComponents(nw, connectivity=4)
+            border = set(lbl[0, :]) | set(lbl[-1, :]) | set(lbl[:, 0]) | set(lbl[:, -1]); border.discard(0)
+            if border:
+                a[np.isin(lbl, list(border)), 3] = 0
+        else:                                             # 情形①：有透明但有白雾 → 清雾
+            haze = ((rgbmin >= 210) & (alpha < 240)) | (alpha < 60)
+            if haze.any():
+                a[haze, 3] = 0
+        buf = io.BytesIO(); Image.fromarray(a, "RGBA").save(buf, "PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:  # noqa: BLE001 —— 清理失败不致命，返回原图（fail-open，不中断抠图）
+        return b64
+
+
+def _segment_grsai(b64, prompt, base_url, key, model, timeout=180, should_cancel=None) -> dict:
     """grsai 图生图编辑后端（复用已配置的 grsai · ai_client.generate_image）。
     用户已配好 key/base_url/model，零额外配置。返回 {"cutouts":[b64]} 或 {"error":...}。
-    key 绝不打日志。"""
+    key 绝不打日志。should_cancel(): 真则中止——总限时（可经 UI「+时间」延长）由调用方经此回调强制。"""
     if not key:
         return {"error": "未配置 grsai Key：请在 AI 面板「设置」里填写 grsai key"}
     if not base_url:
         return {"error": "未配置 grsai 地址：请在 AI 面板「设置」里填写"}
     import ai_client  # 延迟导入：与 seg_client 顶层只依赖 ai_client._SSL 对齐
     instr = prompt or _DEFAULT_EDIT_INSTR
-    res = ai_client.generate_image(instr, key, base_url, ref_b64=b64, model=model, timeout=timeout)
+    ratio = _nearest_ratio_from_b64(b64)   # 让输出比例匹配原图（否则默认 1:1 把宽图压方，用户反馈）
+    # per-read socket 超时放宽到 ≥300s：顶级 4K 模型(nano-banana-pro-4k-vip)慢、grsai 可能久不推流(队列/慢启动)，
+    # urlopen 的 timeout 对【每次读】生效，太小→一次 idle 读就抛 "read operation timed out" 整体断（should_cancel/「+时间」
+    # 只在读【之间】检查，救不了正阻塞的慢读，用户反馈 180s 顶级 4K 必超时）。总限时仍交 should_cancel（可 +时间 延长）。
+    res = ai_client.generate_image(instr, key, base_url, ref_b64=b64, model=model, ratio=ratio,
+                                   timeout=max(300, int(timeout)), should_cancel=should_cancel)
     if res.get("error"):
-        return {"error": res["error"]}  # fail-loud：透传 grsai 的违规/失败/HTTP 错误
+        e = res["error"]
+        if "timed out" in e or "超时" in e:  # 把看不懂的 socket 超时翻成可操作提示（fail-loud 但友好）
+            return {"error": "AI 抠图超时：顶级 4K 模型较慢或网络拥堵。可：①点「+时间」再等；"
+                             "②设置里把「模型」换成低一档（如 nano-banana-pro 非 4K）更快出图；③稍后重试。原始：" + e}
+        return {"error": e}  # fail-loud：透传 grsai 的违规/失败/HTTP 错误
     if res.get("b64"):
-        return {"cutouts": [res["b64"]]}
+        return {"cutouts": [res["b64"]]}   # 半透明白雾清理在 segment_image 统一做（grsai+ppio）
     return {"error": "grsai 未返回图片"}
 
 
 def _segment_ppio(b64, prompt, base_url, key, model, submit_endpoint,
-                  result_endpoint, timeout) -> dict:
+                  result_endpoint, timeout, should_cancel=None) -> dict:
     """PPIO 派欧云 Qwen-Image-Edit 异步后端：提交→拿 task_id→轮询取图→下载转 b64。
     返回 {"cutouts":[b64]} 或 {"error":...}。任一步失败 fail-loud（含 HTTP 状态/截断响应）。
     key 绝不打日志。"""
@@ -256,6 +325,8 @@ def _segment_ppio(b64, prompt, base_url, key, model, submit_endpoint,
     deadline = time.time() + max(1, timeout)
     last = None
     while time.time() < deadline:
+        if should_cancel is not None and should_cancel():   # 用户取消 / 总限时到（可经 UI「+时间」延长）→ 停止轮询
+            return {"error": "已取消或超时（点 +时间 续时后可重试）"}
         obj, err = _ppio_get_result(base + result_path, tid, headers, min(60, timeout))
         if err:
             return {"error": err}
@@ -411,7 +482,7 @@ def _segment_local_onnx(b64) -> dict:
 
 def segment_image(img_bytes_or_b64, mode="foreground", provider="grsai",
                   base_url="", key="", model="", timeout=180, endpoint=None,
-                  prompt=None, result_endpoint=None) -> dict:
+                  prompt=None, result_endpoint=None, should_cancel=None) -> dict:
     """主入口（供 editor_window 后台线程调用）。
     返回 {"cutouts":[b64,...]} 或 {"error":...}。fail-loud：无后端配置即报错。
     prompt：编辑指令（grsai/ppio 用，None=默认去背景）；endpoint/result_endpoint：
@@ -420,11 +491,16 @@ def segment_image(img_bytes_or_b64, mode="foreground", provider="grsai",
         b64 = _normalize_b64(img_bytes_or_b64)
     except Exception as e:
         return {"error": "源图无效：%s" % e}
-    if provider == "grsai":
-        return _segment_grsai(b64, prompt, base_url, key, model, timeout)
-    if provider == "ppio":
-        return _segment_ppio(b64, prompt, base_url, key, model, endpoint,
-                             result_endpoint, timeout)
+    if provider in ("grsai", "ppio"):
+        # 生成式后端（grsai/ppio）易残留半透明白雾 → 统一清成干净透明背景（local/rembg 出干净 matte，不做）。
+        if provider == "grsai":
+            res = _segment_grsai(b64, prompt, base_url, key, model, timeout, should_cancel=should_cancel)
+        else:
+            res = _segment_ppio(b64, prompt, base_url, key, model, endpoint,
+                                result_endpoint, timeout, should_cancel=should_cancel)
+        if res.get("cutouts"):
+            res["cutouts"] = [_clean_cutout_alpha(c) for c in res["cutouts"]]
+        return res
     if provider == "local":
         return _segment_local_onnx(b64)  # 内置 onnxruntime+u2netp，离线去背景
     if provider == "rembg":

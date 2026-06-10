@@ -234,24 +234,73 @@ class GenWorker(QtCore.QThread):
 
 class SegWorker(QtCore.QThread):
     """后台 AI 分割/抠图：单次调用 seg_client（无逐张循环/进度，bar 用 busy 无限滚动即可）。
-    结果经信号回主线程落地素材库。比 GenWorker 简单——抠图是一次性 JSON 响应。"""
+    结果经信号回主线程落地素材库。比 GenWorker 简单——抠图是一次性 JSON 响应。
+
+    总限时可延长（对齐生图 GenWorker）：base deadline = timeout，UI 点「+时间」→ extend(60) 累加；
+    grsai 流式 / ppio 轮询经 should_cancel 强制该 deadline，避免大图/首次慢被硬超时白跑（用户反馈）。
+    """
     done = QtCore.Signal(list, str)   # cutouts(list[b64]), err
 
     def __init__(self, params: dict, parent=None):
         super().__init__(parent)
         self._p = params   # {src_b64, mode, provider, base_url, key, model, timeout, endpoint, prompt?, result_endpoint?}
+        self._extend = 0.0          # 「+时间」累加秒数（线程安全：仅主线程写、worker 只读，float 原子读够用）
+        self._cancel = False
+        self._dur = float(params.get("timeout", 180))
+        self.cur_deadline = 0.0     # run() 起设；_should_cancel 用 monotonic 比对
+
+    def extend(self, seconds: float = 60.0):
+        self._extend += float(seconds)
+
+    def cancel(self):
+        self._cancel = True
+
+    def remaining(self) -> int:
+        if not self.cur_deadline:
+            return int(self._dur)
+        return max(0, int(round(self.cur_deadline + self._extend - time.monotonic())))
+
+    def _should_cancel(self) -> bool:
+        if self._cancel:
+            return True
+        return bool(self.cur_deadline) and time.monotonic() > self.cur_deadline + self._extend
 
     def run(self):
         p = self._p
+        self.cur_deadline = time.monotonic() + self._dur
         res = seg_client.segment_image(
             p["src_b64"], mode=p["mode"], provider=p["provider"],
             base_url=p["base_url"], key=p["key"], model=p["model"],
             timeout=p["timeout"], endpoint=p["endpoint"],
-            prompt=p.get("prompt"), result_endpoint=p.get("result_endpoint"))
+            prompt=p.get("prompt"), result_endpoint=p.get("result_endpoint"),
+            should_cancel=self._should_cancel)
         if res.get("error"):
             self.done.emit([], res["error"])
         else:
             self.done.emit(res.get("cutouts") or [], "")
+
+
+class _TranslateWorker(QtCore.QThread):
+    """后台中译英：调对话 AI（chat_client.chat_complete）把中文提示词翻成英文（模型对英文响应更好）。"""
+    done = QtCore.Signal(str, str)   # english, err
+
+    def __init__(self, text, key, base, model, parent=None):
+        super().__init__(parent)
+        self._t = text; self._key = key; self._base = base; self._model = model
+
+    def run(self):
+        import chat_client
+        msgs = [
+            {"role": "system", "content":
+                "You translate Chinese AI image-generation prompts into concise, natural English. "
+                "Output ONLY the English prompt text (keywords/phrases), no quotes, no explanation, no Chinese."},
+            {"role": "user", "content": self._t},
+        ]
+        res = chat_client.chat_complete(msgs, self._key, self._base, self._model, stream=False, timeout=60)
+        if res.get("error"):
+            self.done.emit("", res["error"])
+        else:
+            self.done.emit((res.get("text") or "").strip(), "")
 
 
 class GenModelsWorker(QtCore.QThread):
@@ -336,6 +385,9 @@ class AiPanel(QtWidgets.QWidget):
                     w.terminate(); w.wait(1000)
         for w in self.findChildren(GenModelsWorker):  # 拉取模型 worker 也排空
             if w.isRunning() and not w.wait(2000):
+                w.terminate(); w.wait(1000)
+        for w in self.findChildren(_TranslateWorker):  # 中译英 worker(parent=self·阻塞60s网络) 也排空，
+            if w.isRunning() and not w.wait(2000):     # 否则翻译在途时退出→销毁仍 run 的 QThread 硬崩(铁律③)
                 w.terminate(); w.wait(1000)
 
     # ---------- UI ----------
@@ -424,6 +476,31 @@ class AiPanel(QtWidgets.QWidget):
         self.prompt.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
         lay.addWidget(self.prompt, 1)
 
+        # —— 提示词预设（对齐大香蕉：分类预设库 + 保存/管理/导入导出；可叠加多个优化方向）——
+        # 预设行（对齐 Forge/修图轮椅：预设(N)▼ 保存 刷新 打开文件夹）——选下拉项即填进正面，删除/导入靠直接编辑 json 文件
+        prow = QtWidgets.QHBoxLayout(); prow.setSpacing(4)
+        self.preset_combo = QtWidgets.QComboBox()
+        self.preset_combo.setToolTip("选一个预设 → 立即把它的英文追加到正面提示词（可连续选多个叠加方向）。\n"
+                                     "★=内置基础方向（不可删）；下拉里【右键】自定义预设可直接删除")
+        self.preset_combo.activated.connect(self._on_preset_selected)  # 选即用（对齐大香蕉：选中就填进提示词）
+        self.preset_combo.view().setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.preset_combo.view().customContextMenuRequested.connect(self._preset_ctx_menu)  # 右键删预设
+        prow.addWidget(self.preset_combo, 1)
+        b_savep = QtWidgets.QToolButton(); b_savep.setText("保存")
+        b_savep.setToolTip("把当前正面提示词存为预设（下次复用；也可存对话 AI 给你的提示词）")
+        b_savep.clicked.connect(self._save_preset)
+        b_refresh = QtWidgets.QToolButton(); b_refresh.setText("刷新")
+        b_refresh.setToolTip("从预设文件重新载入（在文件夹里改了 json / 拷了别人的预设后点这）")
+        b_refresh.clicked.connect(self._reload_presets)
+        b_folder = QtWidgets.QToolButton(); b_folder.setText("打开文件夹")
+        b_folder.setToolTip("打开预设 json 所在文件夹：可直接编辑/删除/拷入别人的预设文件复用，改完点「刷新」")
+        b_folder.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(str(config.prompt_presets_path().parent))))
+        for b in (b_savep, b_refresh, b_folder):
+            prow.addWidget(b)
+        lay.addLayout(prow)
+        self._reload_presets()
+
         self.neg_toggle = QtWidgets.QToolButton()
         self.neg_toggle.setText("负面提示词（已默认填好不友好词，点开可改）")
         self.neg_toggle.setIcon(icons.tool_icon("chevron_right", theme.colors()["text"], 16))
@@ -445,6 +522,29 @@ class AiPanel(QtWidgets.QWidget):
         _nbl.addWidget(self.neg_prompt)
         self.neg_box.setVisible(False)
         lay.addWidget(self.neg_box)
+
+        # 翻译行（对齐 Forge：[输入要翻译的中文…] 翻译 +正向 +负向）——内联，不弹窗。模型对英文更友好。
+        trow = QtWidgets.QHBoxLayout(); trow.setSpacing(4)
+        self.tr_input = QtWidgets.QLineEdit()
+        self.tr_input.setPlaceholderText("输入要翻译的中文…")
+        self.tr_input.setToolTip("中文→英文。「翻译」就地译成英文；「+正向/+负向」译完追加到正面/负面（已是英文则直接加）。回车=翻译")
+        self.tr_input.returnPressed.connect(lambda: self._do_translate(target=None))  # 回车=翻译（顺手）
+        trow.addWidget(self.tr_input, 1)
+        # 注：括号加权重语法只有 SD/Forge 类后端解析；本程序用的 grsai nano-banana/gpt-image 不解析 → 不提供该开关，
+        # 避免误导。将来接入 SD 类后端时再按模型检测加回。
+        b_trn = QtWidgets.QToolButton(); b_trn.setText("翻译")
+        b_trn.setToolTip("把上框中文就地译成英文（预览，不追加）")
+        b_trn.clicked.connect(lambda: self._do_translate(target=None))
+        b_addp = QtWidgets.QToolButton(); b_addp.setText("+正向")
+        b_addp.setToolTip("译成英文并追加到正面提示词（勾 () 则加权重）")
+        b_addp.clicked.connect(lambda: self._do_translate(target="pos"))
+        b_addn = QtWidgets.QToolButton(); b_addn.setText("+负向")
+        b_addn.setToolTip("译成英文并追加到负面提示词（勾 () 则加权重）")
+        b_addn.clicked.connect(lambda: self._do_translate(target="neg"))
+        for b in (b_trn, b_addp, b_addn):
+            trow.addWidget(b)
+        self._tr_btns = [b_trn, b_addp, b_addn]
+        lay.addLayout(trow)
 
         row1 = QtWidgets.QHBoxLayout()
         row1.addWidget(QtWidgets.QLabel("分辨率"))
@@ -746,6 +846,132 @@ class AiPanel(QtWidgets.QWidget):
             return (ref, None) if ref else (None, "无选区，先用套索/矩形/魔棒取选区")
         ref = self._editor._ai_snapshot_b64()  # composite
         return (ref, None) if ref else (None, "画布为空，无法做图生图（先导入或文生图一张）")
+
+    # ---------- 提示词预设（Forge 式：预设(N)▼ 保存 刷新 打开文件夹；选即填进正面）----------
+    def _reload_presets(self, *_):
+        """重载预设下拉：首项「预设 (N)」计数占位 + 按类别分组（每类一行不可选表头，对齐 Forge 分组下拉）。
+        itemData 存预设 dict（表头/占位为 None）。刷新按钮也连此（*_ 吞掉 clicked 的 bool 参数）。"""
+        presets = config.get_prompt_presets()
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("预设 (%d)" % len(presets), None)   # 计数占位
+        for cat in config.PROMPT_PRESET_CATS + ["其它"]:
+            group = [p for p in presets if (p.get("category") or "通用") == cat
+                     or (cat == "其它" and (p.get("category") or "通用") not in config.PROMPT_PRESET_CATS)]
+            if not group:
+                continue
+            self.preset_combo.addItem("— %s —" % cat, None)          # 不可选的分类表头（Forge 式分组）
+            hdr = self.preset_combo.model().item(self.preset_combo.count() - 1)
+            hdr.setEnabled(False)
+            hdr.setData(0, QtCore.Qt.ItemDataRole.UserRole - 1)      # 灰显
+            for p in group:
+                label = ("　★ " if p["builtin"] else "　") + p["name"]
+                self.preset_combo.addItem(label, p)
+        self.preset_combo.blockSignals(False)
+
+    def _preset_ctx_menu(self, pos):
+        """预设下拉右键 → 删除该条用户预设（内置 ★ 不可删，对齐"下拉里直接能删"）。"""
+        view = self.preset_combo.view()
+        idx = view.indexAt(pos)
+        if not idx.isValid():
+            return
+        p = self.preset_combo.itemData(idx.row())
+        if not p:
+            return
+        if p.get("builtin"):
+            self._set_status("内置 ★ 基础预设不可删", err=True); return
+        menu = QtWidgets.QMenu(view)
+        act = menu.addAction("删除预设「%s」" % p["name"])
+        if menu.exec(QtGui.QCursor.pos()) is act:    # 用光标全局位置弹出（修菜单位置偏移）
+            config.delete_prompt_preset(p["name"])
+            self._reload_presets()
+            self._set_status("已删除预设「%s」" % p["name"])
+
+    def _on_preset_selected(self, idx):
+        """选中一个预设 → 把正面提示词【切换】成该预设内容（替换，不追加；点几次都只这一份，不堆积），
+        下拉复位回「预设 (N)」（对齐 Forge：选即切换）。"""
+        p = self.preset_combo.itemData(idx)
+        if not p:
+            return
+        self.preset_combo.setCurrentIndex(0)        # 复位显示计数（下拉按钮始终显示「预设 (N)」）
+        self.prompt.setPlainText(p["text"].strip())  # 切换=替换正面提示词（幂等，多次点同一个无副作用）
+        self._set_status("已切换到预设「%s」" % p["name"])
+
+    def _save_preset(self):
+        text = self.prompt.toPlainText().strip()
+        if not text:
+            self._set_status("正面提示词为空，没什么可保存的", err=True); return
+        dlg = QtWidgets.QDialog(self); dlg.setWindowTitle("存为提示词预设")
+        fl = QtWidgets.QFormLayout(dlg)
+        name_in = QtWidgets.QLineEdit(); name_in.setPlaceholderText("给这条提示词起个名，如：蓝绿统一配色")
+        cat_in = QtWidgets.QComboBox(); cat_in.addItems(config.PROMPT_PRESET_CATS)
+        prev = QtWidgets.QPlainTextEdit(text); prev.setReadOnly(True); prev.setMaximumHeight(80)
+        fl.addRow("名称", name_in); fl.addRow("分类", cat_in); fl.addRow("内容", prev)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Save
+                                        | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); fl.addRow(bb)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        name = name_in.text().strip()
+        if not name:
+            self._set_status("预设名称不能为空", err=True); return
+        if config.add_prompt_preset(name, text, cat_in.currentText()):
+            self._reload_presets()
+            self._set_status("已保存预设「%s」" % name)
+        else:
+            self._set_status("保存预设失败", err=True)
+
+    # ---------- 中译英内联行（对齐 Forge：[中文] 翻译 +正向 +负向）----------
+    @staticmethod
+    def _has_cjk(s) -> bool:
+        return any("一" <= c <= "鿿" for c in (s or ""))
+
+    def _place_translated(self, eng, target):
+        """把英文追加到 正面(pos)/负面(neg) 提示词；负面会自动展开框。"""
+        tgt = self.neg_prompt if target == "neg" else self.prompt
+        cur = tgt.toPlainText().strip()
+        tgt.setPlainText((cur + ", " + eng) if cur else eng)
+        if target == "neg":
+            self.neg_toggle.setChecked(True)
+        self._set_status("已加到%s：%s" % ("负面" if target == "neg" else "正面", eng[:70]))
+
+    def _do_translate(self, target=None):
+        """翻译框：target=None 就地译成英文(预览)；'pos'/'neg' 译完追加到正面/负面（勾 () 则加权重）。
+        已是英文(无中文字符)且要追加 → 直接加，不调 AI。"""
+        text = self.tr_input.text().strip()
+        if not text:
+            self._set_status("先在翻译框输入中文", err=True); return
+        if target is not None and not self._has_cjk(text):   # 已是英文 → 直接追加，省一次网络
+            self._place_translated(text, target); self.tr_input.clear(); return
+        w0 = getattr(self, "_tr_worker", None)               # 防重入（照搬 _send/_pull_models 约定）：在途不重发，
+        if w0 is not None and w0.isRunning():                # 否则快速双击覆盖引用→旧 worker 仍 run+重复追加+孤儿线程
+            self._set_status("翻译进行中…请等本次完成", err=True); return
+        key = config.read_chat_key()
+        conn = config.get_chat_conn() or {}
+        base = conn.get("base_url") or config.chat_base()
+        model = conn.get("model") or "deepseek-chat"
+        if not key:
+            self._set_status("翻译需要对话模型 Key：请到「对话」面板设置里填写", err=True); return
+        for b in self._tr_btns:
+            b.setEnabled(False)
+        self._set_status("翻译中…")
+        self._tr_worker = _TranslateWorker(text, key, base, model, self)
+
+        def _done(eng, err):
+            self._tr_worker = None                            # 生命周期复位（与防重入守卫闭环）
+            for b in self._tr_btns:
+                b.setEnabled(True)
+            if err:
+                self._set_status("翻译失败：" + err, err=True); return
+            if not eng:
+                self._set_status("翻译返回空，请重试", err=True); return
+            if target is None:
+                self.tr_input.setText(eng)                    # 就地预览（可再点 +正向/+负向）
+                self._set_status("已译成英文（点 +正向/+负向 追加，或继续编辑）")
+            else:
+                self._place_translated(eng, target); self.tr_input.clear()
+        self._tr_worker.done.connect(_done)
+        self._tr_worker.start()
 
     def _set_status(self, msg, err=False):
         self.status.setText(msg or "")
