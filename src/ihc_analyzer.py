@@ -1884,8 +1884,13 @@ class IHCBatchDialog(QtWidgets.QDialog):
         if self.cb_thr.currentIndex() != 1:          # Otsu
             hi = iq.otsu_threshold(ch8[tissue]); lo = 0
         preview = (ch8 >= lo) & (ch8 <= hi) & tissue
-        self.view._pix_item.setPixmap(overlay_pixmap(c["rgb"], preview)); self.view.viewport().update()
-        denom = int(tissue.sum()); area = (int(preview.sum()) / denom * 100.0) if denom else 0.0
+        pw, ph = c["pw"], c["ph"]                     # 预览叠加走显示代理（大图不卡）
+        pm = preview
+        if (pw, ph) != (preview.shape[1], preview.shape[0]):
+            import cv2
+            pm = cv2.resize(preview.astype(np.uint8), (pw, ph), interpolation=cv2.INTER_NEAREST).astype(bool)
+        self._cur_show(overlay_pixmap(c["prgb"], pm))
+        denom = int(tissue.sum()); area = (int(preview.sum()) / denom * 100.0) if denom else 0.0  # 面积%用全分辨率
         self.lb_one.setText("全局阈值预览 %.2f%%（运行批量应用到所有图）" % area)
 
     def _settings(self):
@@ -2158,34 +2163,61 @@ class IHCBatchDialog(QtWidgets.QDialog):
                      "target": res["target"], "cc": res["cc"], "ch8": ch8, "is_dab": res["is_dab"],
                      "cs_ch": res["cs_ch"], "thr_label": res["thr_label"], "sr_pre": None}
         self._undo1 = []; self._show_raw_one = False
-        self.view.set_image(overlay_pixmap(rgb, pos))   # 适应窗口
+        self._build_cur_proxy()                         # 显示代理（大图下采样，重绘快）
+        self._cur_show(self._cur_pix(), new_image=True) # set_base：scene 全分辨率，ROI/画笔坐标不变
         self.lb_one.setText("此图 %.2f%%" % (self._results[self._cur_idx]["area_pct"]
                                             if 0 <= self._cur_idx < len(self._results)
                                             and self._results[self._cur_idx].get("ok") else 0.0))
 
+    _DISP_MAX = 2048
+
+    def _build_cur_proxy(self):
+        """为当前预览图建显示代理（长边>_DISP_MAX 下采样），存 prgb/pw/ph；小图原样。"""
+        c = self._cur; rgb = c["rgb"]; h, w = rgb.shape[:2]
+        if max(h, w) > self._DISP_MAX:
+            import cv2
+            sc = self._DISP_MAX / float(max(h, w)); pw, ph = max(1, round(w * sc)), max(1, round(h * sc))
+            c["prgb"] = cv2.resize(rgb, (pw, ph), interpolation=cv2.INTER_AREA); c["pw"], c["ph"] = pw, ph
+        else:
+            c["prgb"] = rgb; c["pw"], c["ph"] = w, h
+
+    def _cur_pix(self, raw=False):
+        """当前图显示代理 pixmap（raw=原图 / 否则阳性叠加）。掩膜降采样到代理尺寸。"""
+        c = self._cur; prgb = c["prgb"]; pw, ph = c["pw"], c["ph"]
+        if raw:
+            return _rgb_to_pixmap(prgb)
+        mask = c["mask"]
+        if (pw, ph) != (mask.shape[1], mask.shape[0]):
+            import cv2
+            mask = cv2.resize(mask.astype(np.uint8), (pw, ph), interpolation=cv2.INTER_NEAREST).astype(bool)
+        return overlay_pixmap(prgb, mask)
+
+    def _cur_show(self, pix, new_image=False):
+        """贴显示代理：新图 set_base(scale 撑满,scene=全分辨率,清ROI)；同图只 setPixmap。"""
+        v = self.view; c = self._cur
+        if new_image or v._pix_item is None:
+            v.set_base(pix, c["rgb"].shape[1], c["rgb"].shape[0])
+        else:
+            v._pix_item.setPixmap(pix)
+        v.viewport().update()
+
     def _show_cur(self):
         if self._cur is None or self.view._pix_item is None:
             return
-        self.view._pix_item.setPixmap(overlay_pixmap(self._cur["rgb"], self._cur["mask"]))
-        self.view.viewport().update()
+        self._cur_show(self._cur_pix())
 
     def _peek_one(self, on):
-        """批量预览：按住 C 临时看原图，松开回叠加（与单图一致）。"""
-        c = self._cur
-        if c is None or self.view._pix_item is None:
+        """批量预览：按住 C 临时看原图，松开回叠加（走代理，按 C 不卡）。"""
+        if self._cur is None or self.view._pix_item is None:
             return
-        self.view._pix_item.setPixmap(_rgb_to_pixmap(c["rgb"]) if on else overlay_pixmap(c["rgb"], c["mask"]))
-        self.view.viewport().update()
+        self._cur_show(self._cur_pix(raw=on))
 
     def _toggle_one_view(self):
-        """批量预览：Tab 在 原图↔叠加 间一键切换（与单图一致）。"""
-        c = self._cur
-        if c is None or self.view._pix_item is None:
+        """批量预览：Tab 在 原图↔叠加 间一键切换。"""
+        if self._cur is None or self.view._pix_item is None:
             return
         self._show_raw_one = not getattr(self, "_show_raw_one", False)
-        self.view._pix_item.setPixmap(_rgb_to_pixmap(c["rgb"]) if self._show_raw_one
-                                      else overlay_pixmap(c["rgb"], c["mask"]))
-        self.view.viewport().update()
+        self._cur_show(self._cur_pix(raw=self._show_raw_one))
 
     def _recompute_cur(self, thr_label=None):
         """从当前(可能手动改过)掩膜重算全套指标 → 更新该图结果行+表+列表。"""
@@ -2277,10 +2309,8 @@ class IHCBatchDialog(QtWidgets.QDialog):
         else:
             sub[circ] = False
         self._edited[c["path"]] = np.packbits(c["mask"])
-        if self.view._pix_item is not None:     # 只重绘笔刷 bbox
-            sub_pix = _rgb_to_pixmap(_overlay_array(c["rgb"][y0:y1, x0:x1], c["mask"][y0:y1, x0:x1]))
-            pm = self.view._pix_item.pixmap(); p = QtGui.QPainter(pm); p.drawPixmap(int(x0), int(y0), sub_pix); p.end()
-            self.view._pix_item.setPixmap(pm); self.view.viewport().update()
+        if self.view._pix_item is not None:     # 代理整体叠加重绘(~15ms，掩膜全分辨率编辑、显示走代理)
+            self._cur_show(self._cur_pix())
         self._recompute_cur()
 
     def _on_one_lasso(self, pts, additive):
