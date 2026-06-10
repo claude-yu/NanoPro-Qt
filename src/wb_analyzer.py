@@ -124,22 +124,30 @@ def load_signal_and_pixmap(path, weighted: bool = False):
     避免它们漏进 8-bit 分支被 convert('RGB') 钳成全白 → 灰度翻转 → 峰倒置/识别不了（实测 bug）。
     显示图由缩放后的测量数组构造（非 im.convert('RGB')），保证「显示==分析」，且 16-bit 不再显示空白。
     """
+    arr, qimg, pol = _decode_wb(path, weighted)
+    return arr, QtGui.QPixmap.fromImage(qimg), pol
+
+
+def _decode_wb(path, weighted: bool = False):
+    """解码 → (measure_array, QImage, polarity)。**纯数据，可在后台线程跑**（QImage 可跨线程，QPixmap 不行）。
+    16bit 重标定用 float32(非float64,省一半)+整数 dtype 跳过 isfinite(只浮点才有 NaN/inf)。"""
     from PIL import Image
     im = Image.open(path)
     raw = np.asarray(im)
     mode = im.mode
     is_highdepth = (raw.dtype != np.uint8) or mode.startswith("I") or mode == "F"
     if mode == "P":
-        arr = raw.astype(np.float64)                       # 调色板原始索引，ImageJ 同口径
+        arr = raw.astype(np.float32)                       # 调色板原始索引，ImageJ 同口径
         qimg = _pil_rgb_to_qimage(im.convert("RGB"))       # 调色板按真色显示
     elif is_highdepth:                                     # 16/32-bit/浮点（含 I;16B/L/N）→ min-max 缩放到 8-bit
-        r = raw.astype(np.float64)
+        r = raw.astype(np.float32)
         if r.ndim == 3:                                    # 多通道高位深 → 先转灰（均值，ImageJ 默认）
             r = r[..., :3].mean(axis=2)
-        finite = np.isfinite(r)                            # fail-loud：浮点 TIF 的 NaN/inf 否则会把整图压成全 0（黑）
-        if not finite.all():
-            print("[wb load] 警告：高位深图含 %d 个非有限像素(NaN/inf)，已置 0 处理" % int((~finite).sum()))
-            r = np.where(finite, r, 0.0)
+        if np.issubdtype(raw.dtype, np.floating):          # 仅浮点 TIF 可能含 NaN/inf；整数 16-bit 跳过省一遍全图
+            finite = np.isfinite(r)
+            if not finite.all():
+                print("[wb load] 警告：浮点图含 %d 个非有限像素(NaN/inf)，已置 0 处理" % int((~finite).sum()))
+                r = np.where(finite, r, np.float32(0))
         mn, mx = float(r.min()), float(r.max())
         arr = (np.clip(np.floor((r - mn) * (256.0 / (mx - mn + 1)) + 0.5), 0, 255)
                if mx > mn else np.zeros_like(r))
@@ -148,7 +156,7 @@ def load_signal_and_pixmap(path, weighted: bool = False):
         arr = wb.to_gray(np.asarray(im.convert("RGB")), weighted=weighted)
         qimg = _pil_rgb_to_qimage(im.convert("RGB"))
     pol = "light_on_dark" if float(np.median(arr)) < 128 else "dark_on_light"
-    return arr, QtGui.QPixmap.fromImage(qimg), pol
+    return arr, qimg, pol
 
 
 def array_to_signal(arr, polarity):
@@ -672,10 +680,87 @@ class ProfilePlot(QtWidgets.QWidget):
 
 
 # ---------- 主面板 ----------
+class _WbLoadWorker(QtCore.QObject):
+    """后台解码 WB 图（解码+16bit重标定，大 TIF 秒级），主线程不冻结。QImage 可跨线程，QPixmap 留主线程建。"""
+    done = QtCore.Signal(object)   # dict: token/ok/source/arr/qimg/pol/error
+
+    def __init__(self):
+        super().__init__(); self._job = None
+
+    def set_job(self, source, weighted, token):
+        self._job = (source, weighted, token)
+
+    @QtCore.Slot()
+    def run(self):
+        job, self._job = self._job, None
+        if job is None:
+            return
+        source, weighted, token = job
+        res = {"token": token}
+        try:
+            kind, val = source
+            if kind == "path":
+                arr, qimg, pol = _decode_wb(val, weighted)
+            else:                                  # qimg：当前图层 QImage → 灰度（大拷贝也移后台）
+                q = val.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+                w, h = q.width(), q.height()
+                a = np.frombuffer(q.constBits(), np.uint8).reshape(h, w, 4)[..., :3]
+                arr = wb.to_gray(np.ascontiguousarray(a), weighted=weighted)
+                pol = "light_on_dark" if float(np.median(arr)) < 128 else "dark_on_light"
+                qimg = val
+            res.update(arr=arr, qimg=qimg, pol=pol, ok=True)
+        except Exception as e:  # noqa: BLE001
+            res["ok"] = False; res["error"] = str(e)
+        self.done.emit(res)
+
+
+def _wb_analyze_one(path, n):
+    """批量逐图：解码+检测条带+算面积 → item（带 qimg 非 QPixmap，可后台线程跑；pixmap 主线程懒建）。"""
+    import wb_batch
+    name = os.path.basename(str(path))
+    try:
+        arr, qimg, pol = _decode_wb(path)
+    except Exception as ex:
+        return {"path": path, "name": name, "arr": None, "pol": "", "qimg": None, "pixmap": None,
+                "boxes": [], "horiz": True, "n_bands": n, "areas": [], "ok": False, "error": "载入失败:%s" % ex}
+    try:
+        boxes, horiz, pol2 = wb_batch.detect_band_boxes(arr, pol, n_bands=n)
+        areas = wb_batch.boxes_to_areas(arr, boxes, horiz, pol2)
+        return {"path": path, "name": name, "arr": arr, "pol": pol2, "qimg": qimg, "pixmap": None,
+                "boxes": boxes, "horiz": horiz, "n_bands": n, "areas": areas,
+                "ok": bool(boxes), "error": "" if boxes else "未检测到条带"}
+    except Exception as ex:
+        return {"path": path, "name": name, "arr": arr, "pol": pol, "qimg": qimg, "pixmap": None,
+                "boxes": [], "horiz": True, "n_bands": n, "areas": [], "ok": False, "error": "分析失败:%s" % ex}
+
+
+class _WbBatchWorker(QtCore.QObject):
+    """后台跑 WB 批量（逐图解码+检测+面积，N 张大图秒级×N），主线程不冻结。协作取消。"""
+    progress = QtCore.Signal(int, int)
+    done = QtCore.Signal(object)   # list[item]（带 qimg，主线程懒建 pixmap）
+
+    def __init__(self, paths, n):
+        super().__init__(); self._paths = paths; self._n = n; self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    @QtCore.Slot()
+    def run(self):
+        items = []
+        for i, path in enumerate(self._paths):
+            if self._cancel:
+                break
+            items.append(_wb_analyze_one(path, self._n))
+            self.progress.emit(i + 1, len(self._paths))
+        self.done.emit(items)
+
+
 class WBAnalyzerPanel(QtWidgets.QWidget):
     """单图 WB 灰度定量。"""
 
     COLS = ["#", "Area", "Mean", "RawIntDen", "IntDen", "归一化"]
+    _load_trigger = QtCore.Signal()   # 跨线程触发载图 worker.run
 
     def __init__(self, editor=None):
         super().__init__()
@@ -687,6 +772,8 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
         self._polarity = "dark_on_light"
         self._rgb_weighted = False   # RGB→灰度：False=(R+G+B)/3(ImageJ 默认) / True=加权亮度
         self._loaded_path = None     # 记住路径，切换 RGB 模式时重载
+        self._load_thread = None; self._load_worker = None; self._load_token = 0; self._closing = False
+        self._prewarm_scipy()        # 后台预热 scipy.signal（首次 find_bands 的 ~660ms 冷导入提前到加载期）
         self._control = None    # 内参标识 cid（("r",id)/("b",band)），None=无
         self._method = "box"    # box=框带IntDen / lane=泳道峰面积
         self._gel_mode = False  # 凝胶分析模式（每框一泳道）
@@ -903,18 +990,8 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
             self.load_path(path)
 
     def load_path(self, path):
-        try:
-            arr, pix, pol = load_signal_and_pixmap(path, weighted=self._rgb_weighted)
-        except Exception as ex:
-            QtWidgets.QMessageBox.warning(self, "载入失败", str(ex)); return
         self._loaded_path = path
-        self._arr = arr
-        self._auto_pol = pol
-        self.view.set_image(pix)
-        self._apply_polarity()
-        self._reset_results_state()
-        self.status.setText("已载入 %dx%d，自动极性=%s。拖框选泳道/带 → 测量。"
-                             % (arr.shape[1], arr.shape[0], "暗带/浅底" if pol == "dark_on_light" else "亮带/深底"))
+        self._submit_load(("path", path))   # 解码+16bit重标定移后台，大图不冻 UI
 
     def use_active_layer(self):
         if self.editor is None:
@@ -923,29 +1000,76 @@ class WBAnalyzerPanel(QtWidgets.QWidget):
         img = layer.get("image") if isinstance(layer, dict) else None
         if img is None or img.isNull():
             QtWidgets.QMessageBox.information(self, "无图层", "没有可用的活动图层图像。请用「载入图片」。"); return
-        # QImage → numpy 灰度（.copy() 立即拥有数据，不依赖 qimg 生命周期）
-        qimg = img.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
-        w, h = qimg.width(), qimg.height()
-        a = np.frombuffer(qimg.constBits(), np.uint8).reshape(h, w, 4).copy()
         self._loaded_path = None
-        self._arr = wb.to_gray(a[..., :3], weighted=self._rgb_weighted)
-        self._auto_pol = "light_on_dark" if float(np.median(self._arr)) < 128 else "dark_on_light"
-        self.view.set_image(QtGui.QPixmap.fromImage(img))
+        self._submit_load(("qimg", img.copy()))   # .copy() detach 独立缓冲：worker 跨线程读时主线程改图层互不影响
+
+    # ---- 后台载图（解码不冻 UI）----
+    def _ensure_load_thread(self):
+        if self._closing:
+            return
+        if self._load_thread is None:
+            self._load_thread = QtCore.QThread(self)
+            self._load_worker = _WbLoadWorker()
+            self._load_worker.moveToThread(self._load_thread)
+            self._load_worker.done.connect(self._on_load_done)
+            self._load_trigger.connect(self._load_worker.run)
+            self._load_thread.start()
+
+    def _submit_load(self, source):
+        self._load_token += 1
+        self.status.setText("载入中…（大图稍候，界面不会卡）")
+        self._ensure_load_thread()
+        self._load_worker.set_job(source, self._rgb_weighted, self._load_token)
+        self._load_trigger.emit()
+
+    @QtCore.Slot(object)
+    def _on_load_done(self, res):
+        if res.get("token") != self._load_token:   # 过期（已换图）→ 丢弃
+            return
+        if not res.get("ok"):
+            self.status.setText("载入失败：%s" % res.get("error", "")); return
+        self._arr = res["arr"]; self._auto_pol = res["pol"]
+        self.view.set_image(QtGui.QPixmap.fromImage(res["qimg"]))   # QPixmap 仅主线程建
         self._apply_polarity()
         self._reset_results_state()
-        self.status.setText("已用当前图层 %dx%d。拖框选泳道/带 → 测量。" % (w, h))
+        pend = getattr(self, "_pending_rois", None)   # 切 RGB 模式重载：出图后恢复框/marker（异步）
+        if pend:
+            self._pending_rois = None
+            rois, markers = pend
+            if rois:
+                self.view.set_rois(rois)
+                self.view.markers = {i for i in markers if i < len(rois)}
+                self._on_rois_changed()
+        self.status.setText("已载入 %dx%d，自动极性=%s。拖框选泳道/带 → 测量。"
+                            % (self._arr.shape[1], self._arr.shape[0],
+                               "暗带/浅底" if res["pol"] == "dark_on_light" else "亮带/深底"))
+
+    def _prewarm_scipy(self):
+        """后台预热 scipy.signal（find_bands/savgol 首调的 ~660ms 冷导入），不阻塞 UI/不持久线程。"""
+        import threading
+        threading.Thread(target=lambda: __import__("scipy.signal"), daemon=True).start()
+
+    def stop_threads(self):
+        """退出停后台载图线程（FloatingToolWindow 子件 closeEvent 不触发，由 EditorWindow.closeEvent 调）。"""
+        self._closing = True
+        if self._load_thread is not None:
+            self._load_thread.quit()
+            if not self._load_thread.wait(3000):
+                self._load_thread.terminate(); self._load_thread.wait(1000)
+            self._load_thread = None; self._load_worker = None
+
+    def closeEvent(self, e):
+        self.stop_threads()
+        super().closeEvent(e)
 
     # ---- 极性 / 量化法 ----
     def _on_rgb_changed(self, *_):
         self._rgb_weighted = (self.cb_rgb.currentIndex() == 1)
         if not self._loaded_path:    # 仅彩色图受影响
             return
-        rois = list(self.view.rois); markers = set(self.view.markers)   # 重载会清框→先快照
+        # 重载会清框 → 快照存 _pending_rois，由异步 _on_load_done 在出图后恢复（否则被后到的 set_image 清掉）
+        self._pending_rois = (list(self.view.rois), set(self.view.markers))
         self.load_path(self._loaded_path)
-        if rois:
-            self.view.set_rois(rois)
-            self.view.markers = {i for i in markers if i < len(rois)}   # set_rois 清了 markers，恢复
-            self._on_rois_changed()
 
     def _on_polarity_changed(self, *_):
         self._apply_polarity(); self.measure()
@@ -1405,13 +1529,18 @@ class BatchDialog(QtWidgets.QDialog):
     """多张 WB 图批量定量（可视化审核版）：左=图片列表，中=选中图+可编辑检测框预览，右=汇总表。
     每张图都能看一眼检测对不对、单独改「带数」重检测、拖框微调，结果实时进表；→ 长/宽表 CSV，归一化留 Excel。"""
 
+    _batch_trigger = QtCore.Signal()   # 跨线程触发批量 worker.run
+    _prev_trigger = QtCore.Signal()    # 跨线程触发未检测预览解码 worker.run
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("wbBatchDialog")
         self.setWindowTitle("WB 批量定量")
         self.resize(1080, 640)
-        self._items: list[dict] = []   # 每图 {path,name,arr,pol,pixmap,boxes,horiz,n_bands,areas,ok,error}
+        self._items: list[dict] = []   # 每图 {path,name,arr,pol,qimg,pixmap,boxes,horiz,n_bands,areas,ok,error}
         self._cur = -1
+        self._batch_thread = None; self._batch_worker = None   # 后台批量线程
+        self._prev_thread = None; self._prev_worker = None; self._prev_token = 0   # 后台未检测预览解码
         v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(10, 10, 10, 10); v.setSpacing(8)
         tc = theme.colors()
 
@@ -1537,31 +1666,56 @@ class BatchDialog(QtWidgets.QDialog):
             self.lst.setCurrentRow(0)   # 触发 _select_image → 预览首张原图
 
     def _preview_raw(self, path):
-        """未检测时：直接显示原图供核对（载入失败明确报错）。"""
+        """未检测时：原图核对（解码移后台，大图选图不冻）。"""
         self.sp_cur.setEnabled(False); self.b_redetect.setEnabled(False)
-        try:
-            _arr, pix, _pol = load_signal_and_pixmap(path)
-        except Exception as ex:
-            self.view.clear(); self.lbl_cur.setText("⚠ 打不开/已损坏：%s" % ex); return
-        self.view.set_image(pix); self.view.viewport().update()
-        self.lbl_cur.setText("原图核对（未检测）· %s" % os.path.basename(str(path)))
+        self._prev_path = path
+        self._prev_token += 1
+        self.lbl_cur.setText("载入中…")
+        if self._prev_thread is None:
+            self._prev_thread = QtCore.QThread(self)
+            self._prev_worker = _WbLoadWorker()
+            self._prev_worker.moveToThread(self._prev_thread)
+            self._prev_worker.done.connect(self._on_prev_done)
+            self._prev_trigger.connect(self._prev_worker.run)
+            self._prev_thread.start()
+        self._prev_worker.set_job(("path", path), False, self._prev_token)
+        self._prev_trigger.emit()
 
-    # ---- 批量检测 ----
-    def run(self):
-        if not getattr(self, "_paths", None) or self.b_run.text().endswith("…"):
+    @QtCore.Slot(object)
+    def _on_prev_done(self, res):
+        if res.get("token") != self._prev_token:    # 过期（已切别的图）→ 丢弃
             return
-        import wb_batch
+        if not res.get("ok"):
+            self.view.clear(); self.lbl_cur.setText("⚠ 打不开/已损坏：%s" % res.get("error", "")); return
+        self.view.set_image(QtGui.QPixmap.fromImage(res["qimg"])); self.view.viewport().update()
+        self.lbl_cur.setText("原图核对（未检测）· %s" % os.path.basename(str(self._prev_path)))
+
+    # ---- 批量检测（后台线程，N 张大图不冻 UI）----
+    def run(self):
+        if not getattr(self, "_paths", None) or self._batch_thread is not None:
+            return
         n = int(self.sp_n.value()) or None
         self.b_run.setEnabled(False); self.b_long.setEnabled(False); self.b_wide.setEnabled(False)
-        self.b_run.setText("运行中…"); QtWidgets.QApplication.processEvents()
-        items = []
-        for i, path in enumerate(self._paths):
-            try:
-                self.status.setText("检测中 %d/%d：%s" % (i + 1, len(self._paths), os.path.basename(path)))
-                QtWidgets.QApplication.processEvents()
-            except RuntimeError:
-                return
-            items.append(self._analyze_path(path, n))
+        self.b_run.setText("运行中…")
+        self.status.setText("检测中 0/%d…" % len(self._paths))
+        self._batch_thread = QtCore.QThread(self)
+        self._batch_worker = _WbBatchWorker(list(self._paths), n)
+        self._batch_worker.moveToThread(self._batch_thread)
+        self._batch_thread.started.connect(self._batch_worker.run)
+        self._batch_worker.progress.connect(self._on_batch_progress)
+        self._batch_worker.done.connect(self._on_batch_done)
+        self._batch_trigger.connect(self._batch_worker.run)   # 备用触发（started 已接）
+        self._batch_thread.start()
+
+    @QtCore.Slot(int, int)
+    def _on_batch_progress(self, i, n):
+        self.status.setText("检测中 %d/%d…" % (i, n))
+
+    @QtCore.Slot(object)
+    def _on_batch_done(self, items):
+        if self._batch_thread is not None:
+            self._batch_thread.quit(); self._batch_thread.wait()
+            self._batch_thread = None; self._batch_worker = None
         try:
             self.b_run.setText("运行批量"); self.b_run.setEnabled(True)
         except RuntimeError:
@@ -1575,23 +1729,26 @@ class BatchDialog(QtWidgets.QDialog):
         self.status.setText("完成：%d 张成功 / %d 张失败。逐张核对检测框；不对就拖框或改带数重检测。归一化在 Excel 用宽表。"
                             % (ok, len(items) - ok))
 
-    def _analyze_path(self, path, n):
-        import wb_batch
-        name = os.path.basename(str(path))
-        try:
-            arr, pixmap, pol = load_signal_and_pixmap(path)
-        except Exception as ex:
-            return {"path": path, "name": name, "arr": None, "pol": "", "pixmap": None,
-                    "boxes": [], "horiz": True, "n_bands": n, "areas": [], "ok": False, "error": "载入失败:%s" % ex}
-        try:
-            boxes, horiz, pol2 = wb_batch.detect_band_boxes(arr, pol, n_bands=n)
-            areas = wb_batch.boxes_to_areas(arr, boxes, horiz, pol2)
-            return {"path": path, "name": name, "arr": arr, "pol": pol2, "pixmap": pixmap,
-                    "boxes": boxes, "horiz": horiz, "n_bands": n, "areas": areas,
-                    "ok": bool(boxes), "error": "" if boxes else "未检测到条带"}
-        except Exception as ex:
-            return {"path": path, "name": name, "arr": arr, "pol": pol, "pixmap": pixmap,
-                    "boxes": [], "horiz": True, "n_bands": n, "areas": [], "ok": False, "error": "分析失败:%s" % ex}
+    def _stop_batch_thread(self):
+        if self._batch_worker is not None:
+            self._batch_worker.cancel()
+        self._prev_token += 1                          # 作废在途预览回调
+        for attr in ("_batch_thread", "_prev_thread"):
+            th = getattr(self, attr, None)
+            if th is not None:
+                th.quit()
+                if not th.wait(5000):
+                    th.terminate(); th.wait(1000)
+                setattr(self, attr, None)
+        self._batch_worker = None; self._prev_worker = None
+
+    def closeEvent(self, e):
+        self._stop_batch_thread()
+        super().closeEvent(e)
+
+    def reject(self):
+        self._stop_batch_thread()
+        super().reject()
 
     # ---- 选中某张图 → 预览 ----
     def _select_image(self, idx):
@@ -1603,7 +1760,9 @@ class BatchDialog(QtWidgets.QDialog):
             return
         self._cur = idx; it = self._items[idx]
         self.sp_cur.setEnabled(True); self.b_redetect.setEnabled(True)
-        if it["pixmap"] is not None:
+        if it.get("pixmap") is None and it.get("qimg") is not None:
+            it["pixmap"] = QtGui.QPixmap.fromImage(it["qimg"])   # 懒建：仅选中的图才建 QPixmap（省内存+主线程一次）
+        if it.get("pixmap") is not None:
             self.view.set_image(it["pixmap"]); self.view.set_rois(it["boxes"]); self.view.sel = 0 if it["boxes"] else -1
         else:
             self.view.clear()             # 失败图：清空画布，不留上一张的框

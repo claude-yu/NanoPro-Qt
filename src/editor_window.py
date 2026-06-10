@@ -1606,6 +1606,9 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         ip = getattr(self, "_ihc_panel", None)   # IHC 单图面板的后台解卷积线程（同 FloatingToolWindow 子 widget closeEvent 不触发）
         if ip is not None and hasattr(ip, "stop_threads"):
             ip.stop_threads()
+        wp = getattr(self, "_wb_panel", None)    # WB 面板的后台载图线程（同坑）
+        if wp is not None and hasattr(wp, "stop_threads"):
+            wp.stop_threads()
         super().closeEvent(e)
 
     def createPopupMenu(self):
@@ -1807,7 +1810,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if not hasattr(self, "_wb_window"):
             from wb_analyzer import WBAnalyzerPanel
             self._wb_window = FloatingToolWindow(self, "WB 灰度定量分析", icons.tool_icon("star", "#27c08a", 16))
-            self._wb_window.set_content(WBAnalyzerPanel(self))
+            self._wb_panel = WBAnalyzerPanel(self)   # 留引用：退出时 closeEvent 停其后台载图线程
+            self._wb_window.set_content(self._wb_panel)
             self._wb_window.resize(1080, 680)
         w = self._wb_window
         if w.isVisible():
