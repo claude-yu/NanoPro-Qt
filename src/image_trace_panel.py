@@ -21,10 +21,15 @@ import theme
 
 
 def _qimage_to_rgb(qimg) -> np.ndarray:
+    """QImage → (H,W,3) RGB，透明像素【合成到白底】（不能直接丢 alpha：透明像素 RGB 多为 0=黑，
+    会让透明图层/抠图素材描摹出黑背景，用户反馈）。透明→白 → 下游描摹按近白当背景正确处理。"""
     q = qimg.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
     w, h = q.width(), q.height()
-    a = np.frombuffer(q.constBits(), np.uint8).reshape(h, w, 4)[..., :3].copy()
-    return np.ascontiguousarray(a)
+    arr = np.frombuffer(q.constBits(), np.uint8).reshape(h, w, 4)
+    rgb = arr[..., :3].astype(np.float32)
+    a = arr[..., 3:4].astype(np.float32) / 255.0
+    comp = rgb * a + 255.0 * (1.0 - a)        # 在白底上 alpha 合成（透明→白）
+    return np.ascontiguousarray(np.clip(comp, 0, 255).astype(np.uint8))
 
 
 def _svg_to_pixmap(svg: str, fit_w: int, fit_h: int, transparent: bool = False) -> QtGui.QPixmap:
@@ -101,7 +106,8 @@ class _TraceWorker(QtCore.QObject):
 class ImageTracePanel(QtWidgets.QWidget):
     """单图「图像描摹」：位图 → 彩色矢量，应用为矢量层（可继续编辑/导出 SVG·PDF）。"""
 
-    PREVIEW_DIM = 480   # 预览缩放档长边（秒级反馈）
+    PREVIEW_DIM = 1400  # 预览缩放档长边。480 太低→白底图下采样把图标色混进白底=预览发白褪色(误导,实际全分辨率应用是鲜艳的)；
+                        # 提到 1400→典型 1000-2000px 图预览≈全分辨率(所见即所得)，仍后台+防抖 ~400ms 可接受
     _trigger = QtCore.Signal()  # 跨线程触发 worker.run
 
     def __init__(self, editor=None):
@@ -118,6 +124,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self._custom_palette = []   # 文档库自定义色板（hex，预留）
         self._ignore_palette = []   # 忽略指定颜色（hex 列表，含吸管取色）
         self._colors_is_threshold = False  # 黑白模式下「颜色数」滑块复用为「阈值」
+        self._engine = "vtracer"    # 引擎：vtracer(软边渐变保真) / crisp(自研三层硬边,扁平图标锐利)；由预设设定
         self._text_remove = False   # 描摹前删文字：开关
         self._text_boxes = []       # MSER 检测的文字行框 [(x0,y0,x1,y1)]（图像坐标），点框可删误判
         self._text_map = None       # (scale, ox, oy) 预览 QLabel→图像坐标映射（点框删用）
@@ -128,6 +135,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self._debounce.timeout.connect(lambda: self._request("preview"))
         self._build_ui()
         self.preview.installEventFilter(self)   # 点预览红框删文字框
+        self._apply_preset(0)                   # 开面板即用「清晰」预设(自动色+杂色16,保真不褪色)，不让用户落在旧的受限默认
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -140,10 +148,9 @@ class ImageTracePanel(QtWidgets.QWidget):
         left = QtWidgets.QVBoxLayout()
         left.setSpacing(4)
         self.preview = QtWidgets.QLabel("先「用当前图层」或「载入图片…」")
+        self.preview.setObjectName("traceImageView")  # 走 theme.py 统一样式，与 WB/IHC 量化区一致(surface_sunken/hairline/2px)
         self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(420, 420)
-        self.preview.setStyleSheet(
-            f"background:{tc['panel']};border:1px solid {tc['border']};border-radius:4px;color:{tc['muted']};")
         left.addWidget(self.preview, 1)
         vrow = QtWidgets.QHBoxLayout()
         vrow.addWidget(QtWidgets.QLabel("视图"))
@@ -172,6 +179,13 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.lbl_src.setStyleSheet(f"color:{tc['muted']};")
         right.addWidget(self.lbl_src)
 
+        # 适用范围提示：描摹擅长扁平图标/线稿；3D 写实图描了会变扁平发糊，该走抠图。
+        tip = QtWidgets.QLabel("💡 描摹擅长扁平图标/线稿(锐利·可改色改节点)。\n"
+                               "3D 写实图(球棍/渐变/照片)描了会变扁平发糊 → 请改用「抠图/拆解」保真出 PNG。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"color:{tc['muted']};font-size:11px;")
+        right.addWidget(tip)
+
         # 顶部一键预设条（6 个，对齐 AI 图标条）
         right.addWidget(self._preset_bar())
 
@@ -187,8 +201,9 @@ class ImageTracePanel(QtWidgets.QWidget):
 
         self.cmb_palette = QtWidgets.QComboBox()
         self.cmb_palette.addItems(["自动", "受限"])
-        self.cmb_palette.setCurrentIndex(1)  # 默认受限：扁平科研图边缘最干净、路径少不卡（实测，对齐 AI 流程）
-        self.cmb_palette.setToolTip("受限=量化到下方「颜色数」(边缘干净·不卡·扁平图首选)；自动=引擎自适应分层(保渐变但路径多)")
+        self.cmb_palette.setCurrentIndex(0)  # 默认自动：保真不褪色（v1.18 实测推翻"受限"——受限调板在白底为主的图上把
+                                             # 24 色预算耗在白/浅背景→饱和的图标色被映射成苍白均值=发白褪色）
+        self.cmb_palette.setToolTip("自动=引擎自适应分层(全色保真·扁平图首选)；受限=量化到下方「颜色数」(白底图易发白褪色,慎用)")
         form.addRow("调板", self.cmb_palette)
 
         self._colors_label = QtWidgets.QLabel("颜色数")
@@ -201,7 +216,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.sld_corners, corners_box = self._slider(0, 100, 50, "高=更多尖角；低=更平滑")
         form.addRow("边角", corners_box)
 
-        self.sld_noise, noise_box = self._slider(0, 100, 16, "去除小于该像素面积的杂色斑点（清掉抗锯齿软边的碎路径，默认16；小元素被吃掉就调低）")
+        self.sld_noise, noise_box = self._slider(0, 100, 6, "去除小于该像素面积的杂色斑点。默认6（太大会把细描边/箭头/字当噪点删掉=糊；要更干净少路径可调大，要找回细线调小）")
         form.addRow("杂色", noise_box)
 
         self.cmb_method = QtWidgets.QComboBox()
@@ -308,14 +323,15 @@ class ImageTracePanel(QtWidgets.QWidget):
                 lab.setText(str(s.value()))
 
     # 6 个一键预设（对齐 AI 顶部图标条）：(短名, 说明, 一组控件设定)。引擎不在预设里（固定 vtracer，描边自动降级）。
-    # 实测重标定(科研简单风扁平插画 2026-06-10)：自动色(非受限)+杂色16 最干净。旧默认杂色4 把抗锯齿软边描成
-    # 2500+ 碎路径(=效果差主因)；受限24 反比自动色多 3.5× 路径(预量化硬色阶→更多层)。自动色+杂色16→全色保真、
-    # 每个非文字素材干净描出、路径 300-500 可拖；文字会糊(预期,用户「除了字体」)。需更细可下调杂色。
+    # 锐利标定(2026-06-10 ultracode 5-agent 研究+实测裁决,推翻杂色16)：糊的头号根因=杂色太大(16)在描摹前把细描边/
+    # 箭头/字形当噪点删了——admet 实测暗线稿恢复率 杂色16=33% → 杂色6=63%。锐利档=【杂色6+多边形(polygon 硬边·SVG小10倍·
+    # 拖动不卡)+相邻(abutting 消层间软缝)】。杂色6 路径会多(~960,正常,保细节的代价);polygon 锚点/体积反而最小。
     PRESETS = [
-        ("清晰", "清晰描摹（自动色+杂色16，边缘干净·全色保真·路径少可拖·扁平科研图首选）", dict(mode=0, palette=0, colors=0, noise=16, paths=50, corners=70, curve=0, create=0)),
-        ("高保真", "高保真（自动色+低杂色8，保留更多细节/小元素，路径更多更重，适合带柔和阴影的渲染图）", dict(mode=0, palette=0, colors=0, noise=8, paths=60, corners=50, curve=0, create=0)),
-        ("低色", "低色简化（受限 8 色，海报扁平风）", dict(mode=0, palette=1, colors=8, noise=12, paths=40, corners=60, curve=0, create=0)),
-        ("灰度", "灰度", dict(mode=1, palette=0, colors=0, noise=8, paths=50, curve=0, create=0)),
+        ("AI锐利", "AI级锐利·平滑曲线（外部 potrace 逐色：全局曲线优化+自适应角点，对标 Illustrator 图像描摹——95%贝塞尔曲线、暗线恢复0.94、渐变填充平滑无发花、孔洞正确、文字可读·扁平 BioRender 图标首选）", dict(engine="potrace", mode=0, palette=0, colors=20, noise=6, paths=50, corners=85, curve=1, method=1, create=0)),
+        ("快速硬边", "快速硬边（自研三层 cv2，纯多边形·不需外部引擎·0.2s 快，但渐变区会发花·锚点多）", dict(engine="crisp", mode=0, palette=0, colors=24, noise=6, paths=50, corners=85, curve=1, method=1, create=0)),
+        ("平滑", "平滑高保真（vtracer 自动色+样条曲线，边缘圆润·色彩最饱满·保渐变细节，适合柔和阴影/渐变渲染图/照片）", dict(engine="vtracer", mode=0, palette=0, colors=0, noise=4, paths=60, corners=50, curve=0, method=0, create=0)),
+        ("低色", "低色简化（受限 8 色，海报扁平风）", dict(mode=0, palette=1, colors=8, noise=8, paths=40, corners=60, curve=1, method=1, create=0)),
+        ("灰度", "灰度", dict(mode=1, palette=0, colors=0, noise=6, paths=50, curve=0, create=0)),
         ("黑白", "黑白（二值）", dict(mode=2, paths=50, curve=0, create=0)),
         ("线稿", "线稿轮廓（黑白描边，自动走自研引擎）", dict(mode=2, paths=60, curve=0, create=1)),
     ]
@@ -335,7 +351,8 @@ class ImageTracePanel(QtWidgets.QWidget):
     def _apply_preset(self, idx):
         cfg = self.PRESETS[idx][2]
         ctrls = [self.cmb_mode, self.cmb_palette, self.sld_colors, self.sld_noise,
-                 self.sld_paths, self.sld_corners, self.cmb_curve, self.cmb_create]
+                 self.sld_paths, self.sld_corners, self.cmb_curve, self.cmb_create, self.cmb_method]
+        self._engine = cfg.get("engine", "vtracer")   # 预设指定引擎（crisp=自研硬边 / vtracer=软边渐变保真）
         for c in ctrls:
             c.blockSignals(True)
         try:
@@ -347,6 +364,7 @@ class ImageTracePanel(QtWidgets.QWidget):
             if "corners" in cfg: self.sld_corners.setValue(cfg["corners"])
             if "curve" in cfg: self.cmb_curve.setCurrentIndex(cfg["curve"])
             if "create" in cfg: self.cmb_create.setCurrentIndex(cfg["create"])
+            if "method" in cfg: self.cmb_method.setCurrentIndex(cfg["method"])
         finally:
             for c in ctrls:
                 c.blockSignals(False)
@@ -452,7 +470,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         # 自动调板(idx0)：n_colors=0
         # 引擎固定 vtracer；create=stroke 时 trace_to_svg 内部自动降级 diy（描边仅 diy 支持）并写 stats.degraded。
         return itr.TraceParams(
-            engine="vtracer",
+            engine=self._engine,
             mode=mode,
             n_colors=n_colors,
             paths=float(self.sld_paths.value()),
@@ -560,6 +578,12 @@ class ImageTracePanel(QtWidgets.QWidget):
         except Exception:  # noqa: BLE001 —— 溯源清理失败不影响应用结果
             pass
         self.status.setText(f"已应用为矢量层 · {stats['engine']} · {stats['n_paths']} 路径。可继续改色/改节点，导出 SVG/PDF。")
+        # 引导：用户常以为描完不能改→点魔棒撞栅格提示。明确告知用矢量工具，想用栅格工具可右键栅格化。
+        try:
+            if hasattr(self.editor, "_toast"):
+                self.editor._toast("描摹完成：用[移动]工具点选元素改色/拖动、[锚点]工具改节点；想用魔棒/套索→右键该层「栅格化为像素层」")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------- 预览 / 状态 ----------------
     def _on_view_change(self, idx):

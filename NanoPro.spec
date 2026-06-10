@@ -29,7 +29,12 @@ a = Analysis(
     binaries=ads_bins + cert_bins + ort_bins + scipy_bins + vtracer_bins,
     # 内置抠图模型 u2netp.onnx → 打到 _MEIPASS/models/（seg_client._local_model_path 读它）
     datas=ads_datas + cert_datas + scipy_datas + vtracer_datas + [(os.path.join("src", "models", "u2netp.onnx"), "models"),
-                                                  ("NanoPro.ico", ".")],  # 运行期 setWindowIcon 读 _MEIPASS/NanoPro.ico
+                                                  ("NanoPro.ico", "."),  # 运行期 setWindowIcon 读 _MEIPASS/NanoPro.ico
+                                                  # potrace.exe（GPLv2，AI锐利档外部子进程引擎）→ _MEIPASS/potrace/；image_trace_potrace.find_potrace_exe 读它。
+                                                  # 主程序绝不 import potrace，纯子进程隔臂调用（同荧光 ImarisConvertBioformats）。GPL 合规：随附 COPYING。
+                                                  (os.path.join("_potrace_bin", "potrace-1.16.win64", "potrace.exe"), "potrace"),
+                                                  (os.path.join("_potrace_bin", "potrace-1.16.win64", "COPYING"), "licenses/potrace"),
+                                                  (os.path.join("_potrace_bin", "potrace-1.16.win64", "AUTHORS"), "licenses/potrace")],
     # certifi/onnxruntime 是惰性 import（PyInstaller 静态分析可能漏）→ 显式列出；cv2 同理
     hiddenimports=[
         "cv2", "certifi", "PySide6QtAds", "onnxruntime", "onnxruntime.capi._pybind_state",
@@ -37,6 +42,8 @@ a = Analysis(
         "wb_analyzer", "wb_quant", "gel_analyzer", "wb_batch", "PIL.Image",
         # IHC 免疫组化定量（菜单懒加载，复刻 Fiji Colour Deconvolution；ihc_analyzer 复用 wb_analyzer.ROIView）。
         "ihc_analyzer", "ihc_quant", "ihc_batch",
+        # 图像描摹引擎：crisp/potrace 子模块菜单懒加载；image_trace_potrace 在 trace_to_svg 内惰性 import。
+        "image_trace", "image_trace_panel", "image_trace_potrace",
         # 图像描摹/矢量化（菜单懒加载 from image_trace_panel import；vtracer .pyd 子模块静态分析可能漏）。
         "image_trace_panel", "image_trace", "vtracer", "vtracer.vtracer",
         # WB 凝胶分析依赖 scipy.signal（find_peaks/savgol，含 Cython 扩展）

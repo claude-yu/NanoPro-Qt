@@ -599,7 +599,11 @@ def make_vector_path_item(qpath):
             self._moved_this_drag = False
             super().mouseReleaseEvent(e)
 
-    return VectorPathItem(qpath)
+    item = VectorPathItem(qpath)
+    # 设备坐标缓存：拖动(平移)时贴缓存好的位图、不每帧重算贝塞尔 → 大量复杂路径(描摹产物常数百条)拖动不卡。
+    # 平移不失效缓存；缩放/改色/改节点时 Qt 自动重建缓存（正确）。
+    item.setCacheMode(QtWidgets.QGraphicsItem.CacheMode.DeviceCoordinateCache)
+    return item
 
 
 def make_vector_group_item():

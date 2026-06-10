@@ -303,6 +303,12 @@ QGraphicsView#wbImageView {
   border: 1px solid @hairline@;
   border-radius: 2px;
 }
+QLabel#traceImageView {
+  background: @surface_sunken@;
+  border: 1px solid @hairline@;
+  border-radius: 2px;
+  color: @muted@;
+}
 QFrame#wbResultsPanel {
   background: @panel@;
   border: 1px solid @hairline@;

@@ -139,8 +139,8 @@ class TraceParams:
     palette: Optional[list] = None  # 受限调板：['#rrggbb', ...]；非空时覆盖 n_colors（量化到该色板）
     paths: float = 50.0            # 路径松紧 0–100（高=更贴合原图/更多锚点；低=更简化）
     corners: float = 50.0          # 边角 0–100（高=更多尖角；低=更平滑）
-    noise: int = 12                # 杂色：去除 < noise 像素面积的斑点（filter_speckle）。实测扁平科研图需 ~12-16
-                                   # 才能清掉抗锯齿软边的碎路径（旧默认 4 → 2500+ 碎块=效果差主因）
+    noise: int = 6                 # 杂色：去除 < noise 像素面积的斑点（filter_speckle）。默认 6——实测裁决：太大(16)会把
+                                   # 细描边/箭头/字形当噪点删掉=线稿糊(暗线恢复 16→33% / 6→63%)；6 保细节，路径多些正常
     method: str = "overlapping"    # 方法：'overlapping' 重叠(堆叠/stacked) | 'abutting' 相邻(挖洞/cutout)
     create: str = "fill"           # 创建：'fill' 填色 | 'stroke' 描边（描边仅 diy 支持；vtracer 选描边会降级 diy）
     curve: str = "spline"          # 曲线：'spline' 样条(平滑) | 'polygon' 多边形(尖角) | 'pixel' 像素
@@ -154,6 +154,12 @@ class TraceParams:
     snap_lines: bool = False       # 将曲线与线条对齐：近水平/垂直线段吸附为正交直线（对齐 AI「将曲线与线条对齐」）
     group: bool = False            # 默认不打组：所有 path 为独立顶层元素 → 导入后每个图形元素直接可拖/可改色；
                                    # True=包进一个 <g> 整体移动（需撤组才能动单个）。面板「描完打组」复选控制。
+    # potrace 档（engine='potrace'，外部 potrace.exe 子进程）参数：暗描边层 / 彩色层 各一组 turdsize+opttolerance
+    potrace_turdsize: int = 12     # 暗层去小斑阈值（大→锚点少；>20 会抹文字，守 ≤20）
+    potrace_opttolerance: float = 0.8  # 暗层曲线拟合容差（大→更平滑锚点少）
+    color_turdsize: int = 10       # 彩色层去小斑
+    color_opttolerance: float = 0.6    # 彩色层曲线容差
+    alphamax: float = 1.0          # potrace 角点阈值（小=多尖角，大=多平滑）
 
 
 # 映射常数（在真实样本上标定，见 docs / 任务2；改这里别散落魔法数）
@@ -303,6 +309,124 @@ def _trace_vtracer(rgb: np.ndarray, params: TraceParams, prequantized: bool) -> 
     if not svg or "<svg" not in svg:  # fail-loud：引擎吐空/非 SVG（0 路径的合法 SVG 在顶层 trace_to_svg 统一判）
         raise RuntimeError("vtracer 返回空或非法 SVG")
     return svg
+
+
+# ============================================================ 锐利硬边·BioRender 档（逐色三层分离 cv2 管线）
+def _trace_crisp(rgb: np.ndarray, params: TraceParams) -> tuple[str, int, dict]:
+    """Illustrator 图像描摹级【锐利硬边】彩色矢量（2026-06-10 ultracode 9-agent 研发 + 实测裁决，方案D骨架+A色量化）。
+
+    对扁平科研图标(BioRender式:纯色大色块+深色细描边线稿)实测 vs vtracer 锐利档：暗线恢复 0.93 vs 0.63、
+    25 path/色 vs 962/782(每色块独立可拖可改色)、221ms vs 500ms。代价=posterize 略降饱和(色保真 S比 0.74 vs vtracer 0.93)。
+
+    三层分离(消 washing 根因)：A 暗描边层(gray<dark_th,单一二值,dilate 1px 救 1-2px 细线→暗线恢复 0.41→0.94)；
+    B 背景层(纯白/低饱和淡色,丢,不耗色板预算)；C 彩色填充层(单独量化,代表色取簇内饱和≥p70 中位=satp70 抗淡,
+    相邻簇 dilate 1px 消白缝→饱和比 0.38→0.74)。逐簇 RETR_CCOMP 外环+内孔,**每连通域独立 evenodd**(防跨域奇偶相消
+    把暗线消掉),approxPolyDP 小 eps 硬边不转贝塞尔。fail-loud:drops 报丢弃数。
+    """
+    import cv2
+    h, w = rgb.shape[:2]
+    rgb = np.ascontiguousarray(rgb[..., :3])
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    hsv_s = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)[..., 1]
+
+    # 参数映射（面板滑块 → 管线常数）
+    n_levels = params.n_colors if (params.n_colors and params.n_colors >= 2) else 24
+    if params.palette:
+        n_levels = len(params.palette)
+    dark_th = 110; white_th = 235; sat_th = 28
+    min_area = max(2, int(params.noise) // 2)        # noise6→3
+    _mk = max(0, int(params.noise))                  # 杂色 → 中值滤波核(合并碎色岛/消发花)；0=不滤波
+    med_k = 0 if _mk < 3 else min(9, _mk if _mk % 2 == 1 else _mk + 1)  # 奇数 3..9，noise6→7
+    dark_min_px = 2
+    eps_px = max(0.4, _lerp(1.6, 0.5, params.paths))  # 路径松紧→直边简化 eps（高 paths=更贴）
+    seam_close = 1; dark_dilate = 1
+
+    # 深色描边层：暗且【低饱和】才算线稿——高饱和(sat>=150)的深色是有颜色的填充(深品红/深蓝原子)，
+    # 入暗层会被单色化丢色（对齐 potrace 修复）；纯黑线 sat~0 仍入暗层。
+    dark_mask = (gray < dark_th) & (hsv_s < 150)
+    palelike = ((np.all(rgb >= white_th, axis=2)) | ((hsv_s < sat_th) & (gray >= dark_th))) & ~dark_mask
+    # 关键：只把【连到图像边界】的淡色判背景丢弃；图标内部的淡色渐变填充(不连边界)保留为彩色，
+    # 否则渐变里的浅色部分被当背景掏成白洞 → 满屏发花 speckle（PK 曲线渐变填充实测主因）。
+    num, lbl = cv2.connectedComponents(palelike.astype(np.uint8), connectivity=4)
+    border = np.unique(np.concatenate([lbl[0, :], lbl[-1, :], lbl[:, 0], lbl[:, -1]]))
+    border = border[border != 0]                       # 0=非淡色区，排除
+    bg_mask = np.isin(lbl, border) if len(border) else np.zeros_like(dark_mask)
+    # 近纯白(min>=245)不消耗彩色调色板预算（高光/白原子/抗锯齿白→透出白底，对齐 potrace）；保留淡彩给彩色层。
+    near_white = rgb.min(axis=2) >= 245
+    color_mask = ~dark_mask & ~bg_mask & ~near_white
+
+    drops = {"dropped_small_contours": 0, "empty_color_blocks": 0, "bg_dropped_px": int(bg_mask.sum())}
+    body = []  # (is_dark, area, path_str)
+
+    def _emit_mask(mask, color, is_dark, mn_px, dilate=0):
+        npx = int(mask.sum())
+        if npx < mn_px:
+            if npx > 0:
+                drops["empty_color_blocks"] += 1
+            return
+        if dilate > 0:  # 消簇间白缝 / 救细线：轻微外扩
+            kk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate + 1, 2 * dilate + 1))
+            mask = cv2.dilate(mask, kk)
+        contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            drops["empty_color_blocks"] += 1
+            return
+        subpaths = []
+        for cnt in contours:
+            if _contour_pixels(cnt) < mn_px:
+                drops["dropped_small_contours"] += 1
+                continue
+            approx = cv2.approxPolyDP(cnt, eps_px, True).reshape(-1, 2)
+            if len(approx) < 2:
+                drops["dropped_small_contours"] += 1
+                continue
+            d = _poly_to_d(approx, smooth=False, corner_deg=0.0)  # 硬边 M/L/Z，不转贝塞尔
+            if d:
+                subpaths.append(d)
+        if not subpaths:
+            drops["empty_color_blocks"] += 1
+            return
+        fill = "#%02X%02X%02X" % (int(color[0]), int(color[1]), int(color[2]))
+        body.append((is_dark, npx, f'<path d="{" ".join(subpaths)}" fill="{fill}" fill-rule="evenodd"/>'))
+
+    # C 彩色层：双边滤波平滑渐变（保边不糊轮廓）→【饱和度感知调色板】量化（饱和簇/淡彩簇分开抢预算，
+    # 保住少数派彩色原子不被近白+淡背景吞掉色板，对齐 potrace 修复）。代表色=簇中位（已按饱和分离，不需 satp70）。
+    rgb_color_src = cv2.bilateralFilter(rgb, 7, 60, 60) if med_k >= 3 else rgb
+    ys, xs = np.where(color_mask)
+    if len(ys) > 0:
+        import image_trace_potrace as _itp
+        cpx_all = rgb_color_src[ys, xs].astype(np.uint8)
+        cs_all = hsv_s[ys, xs]
+        pal = _itp._sat_aware_palette(cpx_all, cs_all, max(2, n_levels))
+        labels = _itp._nearest_palette(cpx_all, pal)
+        lab2d = np.full((h, w), -1, dtype=np.int32)
+        lab2d[ys, xs] = labels
+        # 标签图中值滤波：合并渐变/抗锯齿切出的碎色岛（消"发花"speckle，降锚点）。
+        if med_k >= 3 and len(pal) <= 254:
+            shift = cv2.medianBlur(np.clip(lab2d + 1, 0, 255).astype(np.uint8), med_k)
+            lab2d = shift.astype(np.int32) - 1
+            lab2d[~color_mask] = -1                              # 非彩色区还原（中值可能渗入边沿）
+        for ci in range(len(pal)):
+            m = lab2d == ci
+            if not m.any():
+                continue
+            ys2, xs2 = np.where(m)
+            rep = np.median(rgb[ys2, xs2], axis=0).astype(np.uint8)
+            _emit_mask(m.astype(np.uint8), rep, False, min_area, dilate=seam_close)
+
+    # A 暗描边层：单一二值（不按色细分→线连续），dilate 1px 救细线
+    dark_px = rgb[dark_mask]
+    if len(dark_px) > 0:
+        dark_color = np.median(dark_px, axis=0).astype(np.uint8)
+        _emit_mask(dark_mask.astype(np.uint8), dark_color, True, dark_min_px, dilate=dark_dilate)
+
+    body.sort(key=lambda t: (t[0], -t[1]))             # 彩色块(底,大→小) → 暗描边(顶)
+    n_colors = len(set(p.split('fill="')[1][:7] for _, _, p in body)) if body else 0
+    svg = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+           f'<svg xmlns="http://www.w3.org/2000/svg" version="1.1" '
+           f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">\n'
+           + "\n".join(p for _, _, p in body) + "\n</svg>\n")
+    return svg, max(1, n_colors), drops
 
 
 # ============================================================ 自研 cv2 引擎（兜底）
@@ -494,10 +618,38 @@ def trace_to_svg(image, params: Optional[TraceParams] = None) -> tuple[str, dict
         engine = "diy"
         degraded = "描边创建 vtracer 不支持 → 降级自研引擎"
 
+    # 硬边锐利档（自研三层 cv2）只做彩色填色 → 黑白/灰度/描边 降级自研 diy（fail-loud）
+    if engine == "crisp" and not (params.mode == "color" and params.create == "fill"):
+        engine = "diy"
+        note = "硬边锐利档仅彩色填色，该模式降级自研引擎"
+        degraded = note if degraded is None else degraded + "；" + note
+
+    # potrace 档（外部 potrace.exe 子进程）只做彩色填色；黑白/灰度/描边降级 diy
+    if engine == "potrace" and not (params.mode == "color" and params.create == "fill"):
+        engine = "crisp"
+        note = "potrace 档仅彩色填色，该模式降级硬边锐利档"
+        degraded = note if degraded is None else degraded + "；" + note
+
     prequantized = False
     n_actual = 0
     diy_drops = None
-    if engine == "vtracer":
+    if engine == "potrace":
+        import image_trace_potrace as itp
+        exe, kind = itp.find_potrace_exe()
+        if kind != "exe":                               # potrace.exe 缺失 → 降级 crisp（fail-loud，绝不 import potracer）
+            engine = "crisp"
+            degraded = "potrace.exe 缺失 → 降级硬边锐利档（crisp）"
+            svg, n_actual, diy_drops = _trace_crisp(rgb, params)
+        else:
+            try:
+                svg, n_actual, diy_drops = itp.trace_potrace(rgb, params, exe)
+            except Exception as e:  # noqa: BLE001 —— exe 超时/非零退出/解析失败 → 降级 crisp
+                engine = "crisp"
+                degraded = f"potrace 失败({e}) → 降级硬边锐利档（crisp）"
+                svg, n_actual, diy_drops = _trace_crisp(rgb, params)
+    elif engine == "crisp":
+        svg, n_actual, diy_drops = _trace_crisp(rgb, params)
+    elif engine == "vtracer":
         if params.mode != "bw":  # 黑白交 vtracer binary 处理，不预量化
             rgb, n_actual, prequantized = _quantize(rgb, params)
         try:
