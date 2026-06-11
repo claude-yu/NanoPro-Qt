@@ -24,6 +24,15 @@ import svg_io
 from PySide6 import QtCore, QtGui, QtWidgets
 
 
+def _is_background_ve(ve) -> bool:
+    """描摹逐素材分组的背景组？id=background 或 data-role=background（导入锁定不可选/移）。"""
+    if ve is None:
+        return False
+    if getattr(ve, "id", None) == "background":
+        return True
+    return (getattr(ve, "extra_attrs", None) or {}).get("data-role") == "background"
+
+
 class VectorMixin:
     def _vector_layers(self) -> list:
         return [l for l in self.layers if l.get("kind") == "vector"]
@@ -75,10 +84,16 @@ class VectorMixin:
             self.scene.setSceneRect(0, 0, cw, ch)
         base_z = len(self.layers)
         items = []
+        n_bg_locked = 0
         for it, _ve in pairs:
             it.setZValue(base_z)  # 整组叠在现有栅格层之上（B1 不交错）
             self.scene.addItem(it)
             self._wire_vec_item(it)  # B3：挂拖动入撤销回调（含 group 子项递归）
+            if _is_background_ve(_ve):  # 描摹分组背景组：锁定不可选/移（避免误拖整张底），用户可解组/手动解锁
+                it.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                it.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                it.setData(0, "trace_background")
+                n_bg_locked += 1
             items.append(it)
         self._layer_uid += 1
         layer = {
@@ -97,6 +112,8 @@ class VectorMixin:
         outlined = self._count_outlined_text(velems)
         n_text = self._count_text(velems)
         msg = f"导入 SVG：{n_top} 个顶层元素"
+        if n_bg_locked:
+            msg += f"（含 {n_bg_locked} 个背景组已锁定·可在图层面板解锁）"
         if skipped:
             msg += f"，跳过/只读 {len(skipped)} 个不支持特性（filter/mask/use 等已只读渲染）"
         if outlined:

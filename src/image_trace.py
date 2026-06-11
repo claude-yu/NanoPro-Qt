@@ -160,6 +160,10 @@ class TraceParams:
     color_turdsize: int = 10       # 彩色层去小斑
     color_opttolerance: float = 0.6    # 彩色层曲线容差
     alphamax: float = 1.0          # potrace 角点阈值（小=多尖角，大=多平滑）
+    # 逐素材分组（Phase 1）：把"逐色 path"按空间连通域聚成"每素材一个 <g id=elem_NN>"，让单击拖动=素材级
+    group_elements: bool = True    # 总开关；False=退回旧行为（每 path 独立顶层，与 group 配合）
+    gap_tol_frac: float = 0.012    # 素材聚类间隙阈值（占画布对角线比例；conservative，宁多分不错并）
+    detect_background: bool = True  # 把占主体/贴边的最大簇标 data-role=background 单独成组（默认锁定）
 
 
 # 映射常数（在真实样本上标定，见 docs / 任务2；改这里别散落魔法数）
@@ -683,8 +687,12 @@ def trace_to_svg(image, params: Optional[TraceParams] = None) -> tuple[str, dict
     n_paths = svg.count("<path")
     n_anchors = _count_anchors(svg)
 
-    # 编组（对齐 AI 扩展后的组）：所有 path 包进一个 <g> → 导入后是一个可整体移动/解组的组，不再是几千散件
-    if params.group and n_paths > 1:
+    # 逐素材分组（Phase 1）：扁平 path 按空间连通域聚成 <g id=elem_NN> + 背景组 → svg_io 建 group item，单击拖动=素材级。
+    # 与旧「描完打组」(params.group 全包一个 <g>)互斥：group_elements 优先。
+    grp_stats = None
+    if params.group_elements and n_paths > 1:
+        svg, grp_stats = _regroup_svg(svg, w, h, params)
+    elif params.group and n_paths > 1:
         svg = _wrap_in_group(svg)
 
     # fail-loud：空产物（所有色块被过滤 / 图近单色）→ 标降级，UI 据此弹提示，不静默登记空矢量层
@@ -720,6 +728,8 @@ def trace_to_svg(image, params: Optional[TraceParams] = None) -> tuple[str, dict
         stats["snapped_lines"] = n_snapped   # 吸附为正交直线的段数
     if diy_drops and any(v > 0 for v in diy_drops.values()):
         stats["diy_drops"] = diy_drops  # 仅有丢弃时上浮（薄结构/斑点被删计数）
+    if grp_stats:  # 逐素材分组计数（fail-loud：素材组数/背景/孤立碎片/过度切分告警）
+        stats.update(grp_stats)
     return svg, stats
 
 
@@ -838,3 +848,144 @@ def _count_anchors(svg: str) -> int:
     for m in _D_RE.finditer(svg):
         n += len(re.findall(r'[MLCQSTAmlcqsta]', m.group(1)))
     return n
+
+
+# ============================================================ 逐素材分组（Phase 1：纯本地连通域聚类 + 背景识别）
+_NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _path_bbox(d: str):
+    """从 path d 串取包围盒 (x0,y0,x1,y1)。坐标成对(M/L=2,C=6,Z=0 → 全偶)，控制点并入(略大,聚类用 conservative 无妨)。"""
+    nums = _NUM_RE.findall(d or "")
+    if len(nums) < 2:
+        return None
+    xs = [float(v) for v in nums[0::2]]
+    ys = [float(v) for v in nums[1::2]]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _bbox_gap(a, b) -> float:
+    """两 bbox 间隙（欧氏；重叠=0）。a/b=(x0,y0,x1,y1)。"""
+    dx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    dy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _group_paths_into_elements(bboxes, canvas_wh, gap_tol, min_elem_area, detect_background=True):
+    """path bbox 列表 → (fg_clusters[每簇=path下标列表], bg_paths[背景 path 下标列表或 None], extra)。
+    纯几何, 零渲染/widget/网络。
+
+    背景【先在 path 级识别并排除】(满画布背景 bbox 会覆盖一切→若和前景一起聚类会把前景全吞,故必须先排除):
+      path bbox (大且贴≥2边) / 贴满4边 / 跨度≥85%双向 → 算背景 path。conservative：居中的大主体(不贴边)不算背景。
+    前景聚类: 剩余 path 按 bbox 间隙 ≤ gap_tol 并查集合并(宁多分不错并)。
+    小碎片: 前景簇面积 < min_elem_area → 并入间隙≤2*gap_tol 最近邻簇; 无邻保留(singletons)。
+    """
+    cw, ch = canvas_wh
+    n = len(bboxes)
+    extra = {"singletons": 0, "bg_demoted": 0}
+    if n == 0:
+        return [], None, extra
+    canvas_area = max(1.0, cw * ch)
+
+    def area(bb):
+        return max(0.0, bb[2] - bb[0]) * max(0.0, bb[3] - bb[1])
+
+    # —— 背景 path 级先识别并排除 ——
+    bg_set = set()
+    if detect_background and cw > 0 and ch > 0:
+        for i, bb in enumerate(bboxes):
+            if bb is None:
+                continue
+            touch = ((bb[0] <= 0.02 * cw) + (bb[1] <= 0.02 * ch)
+                     + (bb[2] >= 0.98 * cw) + (bb[3] >= 0.98 * ch))
+            wide = (bb[2] - bb[0] >= 0.85 * cw) and (bb[3] - bb[1] >= 0.85 * ch)
+            big = area(bb) >= 0.55 * canvas_area
+            if (big and touch >= 2) or touch >= 4 or wide:   # 大且贴边 / 贴满4边 / 满画布跨度 = 背景
+                bg_set.add(i)
+    fg = [i for i in range(n) if i not in bg_set]
+
+    # —— 前景并查集按间隙合并（O(M^2)，M=前景 path 数）——
+    pos = {idx: k for k, idx in enumerate(fg)}
+    parent = list(range(len(fg)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]; i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for a_i in range(len(fg)):
+        if bboxes[fg[a_i]] is None:
+            continue
+        for b_i in range(a_i + 1, len(fg)):
+            if bboxes[fg[b_i]] is None:
+                continue
+            if _bbox_gap(bboxes[fg[a_i]], bboxes[fg[b_i]]) <= gap_tol:
+                union(a_i, b_i)
+    groups = {}
+    for a_i in range(len(fg)):
+        groups.setdefault(find(a_i), []).append(fg[a_i])
+    clusters = list(groups.values())
+
+    def cl_bbox(idxs):
+        bs = [bboxes[k] for k in idxs if bboxes[k] is not None]
+        if not bs:
+            return (0.0, 0.0, 0.0, 0.0)
+        return (min(b[0] for b in bs), min(b[1] for b in bs),
+                max(b[2] for b in bs), max(b[3] for b in bs))
+
+    # —— 小碎片吸收（防虚线/点阵/文字过度切分）——
+    cl_info = [(idxs, cl_bbox(idxs)) for idxs in clusters]
+    cl_info.sort(key=lambda t: -area(t[1]))
+    kept = []
+    for idxs, bb in cl_info:
+        if area(bb) >= min_elem_area or not kept:
+            kept.append([list(idxs), bb]); continue
+        best = None; bestg = None
+        for k, (_kidx, kbb) in enumerate(kept):
+            g = _bbox_gap(bb, kbb)
+            if g <= 2 * gap_tol and (bestg is None or g < bestg):
+                bestg = g; best = k
+        if best is not None:
+            kept[best][0].extend(idxs)
+            kb = kept[best][1]
+            kept[best][1] = (min(kb[0], bb[0]), min(kb[1], bb[1]), max(kb[2], bb[2]), max(kb[3], bb[3]))
+        else:
+            kept.append([list(idxs), bb]); extra["singletons"] += 1
+    return [k[0] for k in kept], (sorted(bg_set) if bg_set else None), extra
+
+
+def _regroup_svg(svg: str, w: int, h: int, params: "TraceParams"):
+    """把扁平 <path> 产物按素材聚类重组为 <g id=background>/<g id=elem_NN>。返回 (新svg, grp_stats)。
+    引擎无关(在最终 SVG 串上做)。背景组 data-role=background 放最底层 + 默认锁定(svg_io/editor 据此)。"""
+    paths = _PATH_RE.findall(svg)
+    grp = {"n_elements": 0, "has_background": False, "bg_paths": 0,
+           "singletons": 0, "over_segmented": 0, "bg_demoted": 0}
+    if len(paths) < 2:
+        return svg, grp
+    bboxes = [_path_bbox((_D_RE.search(p) or [None, ""]).group(1) if _D_RE.search(p) else "") for p in paths]
+    diag = (w * w + h * h) ** 0.5
+    gap_tol = max(1.0, params.gap_tol_frac * diag)
+    min_elem_area = 0.0004 * max(1.0, w * h)
+    clusters, bg_paths, extra = _group_paths_into_elements(
+        bboxes, (w, h), gap_tol, min_elem_area, params.detect_background)
+    grp["singletons"] = extra["singletons"]; grp["bg_demoted"] = extra.get("bg_demoted", 0)
+    # 组装：背景组(最底,锁定) + 素材组。bg_paths 已从 clusters 排除，两者并集=全部 path（无丢弃）。
+    parts = []
+    if bg_paths:
+        parts.append('<g id="background" data-role="background">'
+                     + "".join(paths[i] for i in bg_paths) + "</g>")
+        grp["has_background"] = True; grp["bg_paths"] = len(bg_paths)
+    for k, idxs in enumerate(clusters):
+        parts.append('<g id="elem_%02d">%s</g>' % (k, "".join(paths[i] for i in idxs)))
+    grp["n_elements"] = len(clusters)
+    grp["over_segmented"] = grp["n_elements"] if grp["n_elements"] > 60 else 0
+    # 写回 <svg>…</svg> 之间
+    m = re.search(r"<svg\b[^>]*>", svg); end = svg.rfind("</svg>")
+    if not m or end < 0:
+        return svg, grp
+    return svg[:m.end()] + "\n" + "\n".join(parts) + "\n" + svg[end:], grp

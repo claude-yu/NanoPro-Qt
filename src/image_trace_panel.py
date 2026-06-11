@@ -246,6 +246,9 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.chk_group = QtWidgets.QCheckBox("描完打组")
         self.chk_group.setToolTip("勾上：描摹结果包成一个组（整体移动/管理）；不勾(默认)：每个图形元素是独立对象，\n应用后可直接逐个拖动调整，无需先撤组。")
         self.chk_group.setChecked(False)   # 默认不打组 → 描完每个元素直接可拖（用户要的所见即所得编辑）
+        self.chk_group_elem = QtWidgets.QCheckBox("逐素材分组（单击拖整个素材）")
+        self.chk_group_elem.setToolTip("勾上(默认)：把同一素材的多条颜色路径按空间连通域聚成一组 → 单击拖动=整个素材(图标/箭头)，\n而非单条颜色块；满画布底色自动识别为背景组并锁定。不勾：每条颜色路径独立。")
+        self.chk_group_elem.setChecked(True)
         right.addWidget(self.chk_snap)
         trow = QtWidgets.QHBoxLayout()
         trow.addWidget(self.chk_transparent, 1)
@@ -255,6 +258,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         trow.addWidget(self.btn_ignore)
         right.addLayout(trow)
         right.addWidget(self.chk_group)
+        right.addWidget(self.chk_group_elem)
 
         # 参数变化 → debounce 预览
         for w in (self.cmb_mode, self.cmb_palette, self.cmb_method, self.cmb_curve, self.cmb_create):
@@ -483,7 +487,8 @@ class ImageTracePanel(QtWidgets.QWidget):
             ignore_white=self.chk_transparent.isChecked(),
             ignore_colors=list(self._ignore_palette) if self._ignore_palette else None,
             snap_lines=self.chk_snap.isChecked(),
-            group=self.chk_group.isChecked(),   # 默认不打组 → 每个元素独立可拖
+            group=self.chk_group.isChecked(),   # 旧「描完打组」：全包一个 <g>
+            group_elements=self.chk_group_elem.isChecked(),  # 逐素材分组（优先于 group）→ 单击拖整素材
             bw_threshold=bw_threshold,
             max_dim=0 if full else self.PREVIEW_DIM,
         )

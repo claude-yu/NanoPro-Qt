@@ -340,6 +340,9 @@ def _walk(el, z_counter: list, skipped: list, id_map: Optional[dict] = None) -> 
         extra = {a: el.get(a) for a in _FILTER_ATTRS if el.get(a)}
         if extra:
             skipped.append((el.get("id") or f"<g> #{z}") + "（裁剪/蒙版引用只读保留）")  # fail-loud 报数
+        role = el.get("data-role")   # 描摹逐素材分组：背景组 data-role=background（往返保留 + 导入据此锁定）
+        if role:
+            extra["data-role"] = role
         return VElem(type="group", id=el.get("id"), transform=transform, z=z,
                      opacity=_opacity(el, style), children=children, extra_attrs=extra)
 
