@@ -2677,8 +2677,11 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.opacity_slider.sliderReleased.connect(self._on_opacity_commit)  # 松手提交（入历史）
         op_row.addWidget(self.opacity_slider, 1); op_row.addWidget(self.opacity_lbl)
         _lcd.addLayout(op_row)
+        _attr_sep = QtWidgets.QFrame()  # 【属性区:混合/填充/不透明度】↔【操作区:图标栏/导出】水平 hairline 分隔
+        _attr_sep.setObjectName("hairlineH"); _attr_sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        _lcd.addWidget(_attr_sep)
         # —— PS 式底部图标工具栏：新建层 / 删除当前层 / 打组 / 解组 / 亮度对比度 ——
-        bbar = QtWidgets.QHBoxLayout(); bbar.setSpacing(2)
+        bbar = QtWidgets.QHBoxLayout(); bbar.setSpacing(4)  # 4px 对齐 PS graphite 底栏密度（原 2px 6 图标挤成团）
         tc = theme.colors()["text"]
         for _ic, _text, _tip, _slot in (
             ("new_layer", "新建", "新建白色图层", self.new_white_layer),
@@ -2688,6 +2691,9 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
             ("adjust", "明暗", "亮度 / 对比度（图像>调整，作用于当前层）", self.brightness_contrast_dialog),
             ("mask", "蒙版", "图层蒙版：先在该层取选区，再点此从选区生成蒙版（非破坏·选区内露外藏·原图不动；删除走图层右键）", self._mask_from_selection),
         ):
+            if _ic == "adjust":   # 图层 CRUD(新建/删除/打组/解组) ↔ 图像调整(明暗/蒙版) 之间插竖向 hairline 分组
+                _vd = QtWidgets.QFrame(); _vd.setObjectName("optionDivider")
+                _vd.setFrameShape(QtWidgets.QFrame.Shape.VLine); bbar.addWidget(_vd)
             tbtn = QtWidgets.QToolButton()
             tbtn.setObjectName("layerAction")
             tbtn.setText(_text)
@@ -2909,7 +2915,8 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.asset_count = QtWidgets.QLabel("0"); self.asset_count.setVisible(False)  # 隐藏；计数显示在 Tab 文案上
         self.extract_asset_stack = QtWidgets.QStackedWidget()
         self.extract_asset_empty = EmptyState(
-            "scissors", "还没有抠出素材", "从选区、去背景或自动拆解生成的元素会出现在这里。")
+            "scissors", "还没有抠出素材", "从选区、去背景或自动拆解生成的元素会出现在这里。",
+            button_text="用魔棒抠图", slot=lambda: self.set_tool("wand"))
         self.asset_list = QtWidgets.QListWidget()
         self.asset_list.setObjectName("assetGrid")
         self.asset_list.setViewMode(QtWidgets.QListWidget.ViewMode.IconMode)
@@ -3013,6 +3020,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.info_label = QtWidgets.QLabel("未加载图片")
         self.info_label.setObjectName("statusDoc")
         self.info_label.setMinimumWidth(180)
+        self.info_label.setToolTip("当前文档：画布尺寸 / DPI / 图层数等信息")
         self.op_label = QtWidgets.QLabel("")
         self.op_label.setObjectName("statusOp")
         self.op_label.setMinimumWidth(220)
@@ -3022,6 +3030,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         self.fps_label.setVisible(False)  # FPS 浮标默认关（开发脚手架），调试菜单可开
         self.coord_label = QtWidgets.QLabel("X -  Y -")
         self.coord_label.setObjectName("statusMeta")
+        self.coord_label.setToolTip("光标在画布上的 X / Y 像素坐标（鼠标移到画布上时显示）")
         self.coord_label.setMinimumWidth(92)
         self.coord_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.layer_status_label = QtWidgets.QLabel("0 层")
@@ -3044,6 +3053,7 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
 
         self.zoom_label = QtWidgets.QLabel("100%")
         self.zoom_label.setObjectName("statusZoom")
+        self.zoom_label.setToolTip("当前视图缩放比例（用两侧 − / + 或 适应 / 1:1 调整）")
         self.zoom_label.setMinimumWidth(52)
         self.zoom_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.zoom_label.setProperty("mono", True)  # 等宽→百分比变化不抖

@@ -78,6 +78,7 @@ QToolBar#optionsBar QToolButton:hover { background: @button_hover@; border-color
 QToolBar#optionsBar QToolButton:checked { background: @row_active@; border-color: @accent@; color: @accent@; }
 QFrame#optionsShell { background: @menu_bar@; border: none; border-radius: 0; min-height: 28px; }
 QFrame#optionDivider { background: @hairline@; border: none; max-width: 1px; }
+QFrame#hairlineH { background: @hairline@; border: none; max-height: 1px; }
 QLabel#optionToolIcon { background: transparent; border: none; border-radius: 0; }
 QLabel#optionToolTitle { color: @text@; font-weight: 700; padding: 0 2px; }
 QLabel#optionLabel { color: @muted@; font-size: 11px; }
@@ -372,6 +373,8 @@ QLabel#wbStatus {
   padding: 6px 9px;
   font-size: 11px;
 }
+QLabel#traceStatus { color: @muted@; }
+QLabel#traceStatus[warn="true"] { color: @ihc_accent@; }
 QSplitter#wbSplit::handle {
   background: @hairline@;
 }

@@ -139,14 +139,13 @@ class ImageTracePanel(QtWidgets.QWidget):
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        tc = theme.colors()
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        root.setSpacing(6)  # 对齐 WB/IHC/AI 面板 6px 节奏
 
         # 左：预览 + 视图模式
         left = QtWidgets.QVBoxLayout()
-        left.setSpacing(4)
+        left.setSpacing(6)
         self.preview = QtWidgets.QLabel("先「用当前图层」或「载入图片…」")
         self.preview.setObjectName("traceImageView")  # 走 theme.py 统一样式，与 WB/IHC 量化区一致(surface_sunken/hairline/2px)
         self.preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -176,14 +175,14 @@ class ImageTracePanel(QtWidgets.QWidget):
         srow.addWidget(b_layer); srow.addWidget(b_open)
         right.addLayout(srow)
         self.lbl_src = QtWidgets.QLabel("（未载入）")
-        self.lbl_src.setStyleSheet(f"color:{tc['muted']};")
+        self.lbl_src.setObjectName("optionLabel")  # muted 11px（走 theme，切主题自动重着色）
         right.addWidget(self.lbl_src)
 
         # 适用范围提示：描摹擅长扁平图标/线稿；3D 写实图描了会变扁平发糊，该走抠图。
         tip = QtWidgets.QLabel("💡 描摹擅长扁平图标/线稿(锐利·可改色改节点)。\n"
                                "3D 写实图(球棍/渐变/照片)描了会变扁平发糊 → 请改用「抠图/拆解」保真出 PNG。")
         tip.setWordWrap(True)
-        tip.setStyleSheet(f"color:{tc['muted']};font-size:11px;")
+        tip.setObjectName("optionLabel")  # muted 11px（走 theme）
         right.addWidget(tip)
 
         # 顶部一键预设条（6 个，对齐 AI 图标条）
@@ -238,7 +237,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         form.addRow("描边宽", self.spin_stroke)
         right.addLayout(form)
 
-        # 选项复选框（对齐 AI：将曲线与线条对齐 / 透明度）
+        # 输出选项：4 复选 + 忽略色 收进「输出选项」分组框（QGroupBox 走 theme.py token，深浅主题自动跟随）
         self.chk_snap = QtWidgets.QCheckBox("将曲线与线条对齐")
         self.chk_snap.setToolTip("把近水平/垂直的线段吸附成正交直线（坐标轴/直边更整洁）")
         self.chk_transparent = QtWidgets.QCheckBox("透明度（忽略白底）")
@@ -249,16 +248,19 @@ class ImageTracePanel(QtWidgets.QWidget):
         self.chk_group_elem = QtWidgets.QCheckBox("逐素材分组（单击拖整个素材）")
         self.chk_group_elem.setToolTip("勾上(默认)：把同一素材的多条颜色路径按空间连通域聚成一组 → 单击拖动=整个素材(图标/箭头)，\n而非单条颜色块；满画布底色自动识别为背景组并锁定。不勾：每条颜色路径独立。")
         self.chk_group_elem.setChecked(True)
-        right.addWidget(self.chk_snap)
-        trow = QtWidgets.QHBoxLayout()
-        trow.addWidget(self.chk_transparent, 1)
         self.btn_ignore = QtWidgets.QPushButton("忽略色…")
         self.btn_ignore.setToolTip("吸取/选一个要忽略的颜色（描摹时不为该色生成路径）；再次点同色可清除")
         self.btn_ignore.clicked.connect(self._pick_ignore_color)
-        trow.addWidget(self.btn_ignore)
-        right.addLayout(trow)
-        right.addWidget(self.chk_group)
-        right.addWidget(self.chk_group_elem)
+        opt_box = QtWidgets.QGroupBox("输出选项")
+        opt_grid = QtWidgets.QGridLayout(opt_box)
+        opt_grid.setContentsMargins(8, 4, 8, 6); opt_grid.setSpacing(6)
+        opt_grid.addWidget(self.chk_group_elem, 0, 0)
+        opt_grid.addWidget(self.chk_group, 0, 1)
+        opt_grid.addWidget(self.chk_snap, 1, 0)
+        trow = QtWidgets.QHBoxLayout(); trow.setContentsMargins(0, 0, 0, 0); trow.setSpacing(6)
+        trow.addWidget(self.chk_transparent); trow.addWidget(self.btn_ignore)
+        opt_grid.addLayout(trow, 1, 1)
+        right.addWidget(opt_box)
 
         # 参数变化 → debounce 预览
         for w in (self.cmb_mode, self.cmb_palette, self.cmb_method, self.cmb_curve, self.cmb_create):
@@ -277,8 +279,8 @@ class ImageTracePanel(QtWidgets.QWidget):
 
         right.addStretch(1)
         self.status = QtWidgets.QLabel("就绪。")
+        self.status.setObjectName("traceStatus")  # 走 theme QLabel#traceStatus（正常=muted / [warn]=ihc_accent），深浅主题自动跟随
         self.status.setWordWrap(True)
-        self.status.setStyleSheet(f"color:{tc['muted']};")
         right.addWidget(self.status)
 
         # 描摹前删文字：检测文字行 → 红框给用户看 → 点框删误判 → 描摹时 inpaint 抹除（守住"每个素材都能描边"）
@@ -296,6 +298,7 @@ class ImageTracePanel(QtWidgets.QWidget):
         right.addLayout(trow)
 
         self.btn_apply = QtWidgets.QPushButton("应用为矢量层（全分辨率）")
+        self.btn_apply.setProperty("primary", True)  # 主 CTA → 走 theme QPushButton[primary]，对齐 WB/IHC/AI 面板
         self.btn_apply.setToolTip("用原始分辨率重新描摹并登记为可编辑矢量层（可继续改色/改节点，导出 SVG/PDF）")
         self.btn_apply.clicked.connect(lambda: self._request("full"))
         self.btn_apply.setEnabled(False)
@@ -342,14 +345,14 @@ class ImageTracePanel(QtWidgets.QWidget):
 
     def _preset_bar(self):
         w = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(w)
-        row.setContentsMargins(0, 0, 0, 0); row.setSpacing(3)
+        grid = QtWidgets.QGridLayout(w)
+        grid.setContentsMargins(0, 0, 0, 0); grid.setSpacing(6)  # 两行布局 → 中文预设名宽度翻倍可读、不挤不截断
         for i, (name, tip, _cfg) in enumerate(self.PRESETS):
             b = QtWidgets.QToolButton(); b.setText(name)
             b.setToolTip(f"一键预设：{tip}")
             b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
             b.clicked.connect(lambda _=False, idx=i: self._apply_preset(idx))
-            row.addWidget(b, 1)
+            grid.addWidget(b, i // 4, i % 4)   # 4 列两行（7 个 → 4+3）
         return w
 
     def _apply_preset(self, idx):
@@ -749,13 +752,13 @@ class ImageTracePanel(QtWidgets.QWidget):
             spx = d.get("removed_speckle_px", 0)   # 像素量纲单独报（去噪开运算抹掉的）
             if spx:
                 warns.append(f"去噪抹除 {spx} 像素")
-        tc = theme.colors()
         if warns:
             self.status.setText(msg + "\n⚠ " + "；".join(warns))
-            self.status.setStyleSheet(f"color:{tc.get('warn', '#c08a2a')};")
+            self.status.setProperty("warn", True)
         else:
             self.status.setText(msg)
-            self.status.setStyleSheet(f"color:{tc['muted']};")
+            self.status.setProperty("warn", False)
+        self.status.style().unpolish(self.status); self.status.style().polish(self.status)  # property 变 → 重着色(走 theme token)
 
     # ---------------- 生命周期 ----------------
     def stop_thread(self):
