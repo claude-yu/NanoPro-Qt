@@ -298,6 +298,35 @@ class ProgressSheet(QtWidgets.QDialog):
         QtWidgets.QApplication.processEvents()
 
 
+class _UpdateCheckWorker(QtCore.QThread):
+    """后台查 GitHub releases/latest（纯网络，updater.fetch_latest）。done 回主线程。"""
+    done = QtCore.Signal(dict)
+
+    def run(self):
+        import updater
+        self.done.emit(updater.fetch_latest())
+
+
+class _UpdateDownloadWorker(QtCore.QThread):
+    """后台下载安装包（updater.download，分块+可取消）。progress/done 回主线程。"""
+    progress = QtCore.Signal(int, int)   # done_bytes, total_bytes
+    done = QtCore.Signal(str)            # 错误串（""=成功）
+
+    def __init__(self, url, dest, parent=None):
+        super().__init__(parent)
+        self._url = url; self._dest = dest; self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        import updater
+        err = updater.download(self._url, self._dest,
+                               progress_cb=lambda d, t: self.progress.emit(d, t),
+                               should_cancel=lambda: self._cancel)
+        self.done.emit(err or "")
+
+
 class LayerRow(QtWidgets.QWidget):
     """图层面板一行（PS 式）：显隐 + 大缩略图 + 名称 + 右侧锁；双击重命名；激活层高亮。
     层级调整(▲▼)/删除/勾选打组收进【右键菜单】，常用操作走面板底部图标栏（更贴 PS）。"""
@@ -1617,6 +1646,13 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         if dw is not None and dw.isRunning():
             if not dw.wait(3000):
                 dw.terminate(); dw.wait(1000)
+        for _wn in ("_upd_dl_worker", "_upd_check_worker"):   # 检查更新/下载 worker 同停（下载可能在跑）
+            uw = getattr(self, _wn, None)
+            if uw is not None and uw.isRunning():
+                if hasattr(uw, "cancel"):
+                    uw.cancel()
+                if not uw.wait(2000):
+                    uw.terminate(); uw.wait(1000)
         # 退出前停 图像描摹 面板的常驻 QThread：面板装在 FloatingToolWindow 里，其 closeEvent 只 hide 不 close，
         # 面板自身 closeEvent 永不触发 → 线程不停被销毁会硬崩（与 SegWorker 同坑，铁律③）。显式调 stop_thread。
         tp = getattr(self, "_trace_panel", None)
@@ -1823,6 +1859,93 @@ class EditorWindow(QtWidgets.QMainWindow, ConnectorsMixin, ExportMixin, AssetsMi
         act_seg.setToolTip("配置 AI 分割/抠图后端（HTTP image-edit 兼容 / 本地 rembg）")
         plug.addSeparator()
         more = plug.addAction(icons.tool_icon("settings", tc["muted"], 16), "更多工具将并入此处…"); more.setEnabled(False)
+
+        helpm = self.menuBar().addMenu("帮助")
+        import config as _cfg
+        act_upd = helpm.addAction(icons.tool_icon("adjust", tc["text"], 16),
+                                  "检查更新…", self._check_update)
+        act_upd.setToolTip("从 GitHub 检查新版本（设置/预设存 ~/.sciedit，升级不丢）")
+        act_about = helpm.addAction("关于 NanoPro v%s" % _cfg.APP_VERSION)
+        act_about.setEnabled(False)
+
+    # ---------- 应用内检查更新（帮助菜单） ----------
+    def _check_update(self):
+        if getattr(self, "_upd_check_worker", None) is not None and self._upd_check_worker.isRunning():
+            self.op_label.setText("正在检查更新，请稍候…"); return
+        self.op_label.setText("正在检查更新…")
+        self._upd_check_worker = _UpdateCheckWorker(self)
+        self._upd_check_worker.done.connect(self._on_update_checked)
+        self._upd_check_worker.start()
+
+    def _on_update_checked(self, info):
+        import updater
+        self._upd_check_worker = None
+        if info.get("error"):
+            self.op_label.setText(info["error"])
+            QtWidgets.QMessageBox.warning(self, "检查更新", info["error"]); return
+        cur = updater.current_version(); latest = info.get("version") or ""
+        if not updater.is_newer(latest, cur):
+            self.op_label.setText("已是最新版 v%s" % cur)
+            QtWidgets.QMessageBox.information(self, "检查更新", "当前已是最新版 v%s。" % cur); return
+        notes = (info.get("notes") or "").strip()
+        notes = notes[:600] + ("…" if len(notes) > 600 else "")
+        box = QtWidgets.QMessageBox(self); box.setWindowTitle("发现新版本")
+        box.setIcon(QtWidgets.QMessageBox.Icon.Information); box.setInformativeText(notes)
+        if updater.is_frozen() and info.get("setup_url"):
+            box.setText("发现新版 v%s（当前 v%s）。\n你的设置/预设存在 ~/.sciedit，升级不会丢失。" % (latest, cur))
+            b_dl = box.addButton("下载并安装", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            b_page = box.addButton("打开发布页", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+            box.addButton("取消", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_dl:
+                self._start_update_download(info["setup_url"], latest)
+            elif box.clickedButton() is b_page:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl(info.get("html_url") or updater.RELEASES_PAGE))
+        else:  # 源码运行 / 无 setup 资产
+            box.setText("发现新版 v%s（当前 v%s）。\n你在用源码运行：请到项目目录 git pull 更新，或打开发布页下载安装版。" % (latest, cur))
+            b_page = box.addButton("打开发布页", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("取消", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_page:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl(info.get("html_url") or updater.RELEASES_PAGE))
+
+    def _start_update_download(self, url, version):
+        import os
+        import tempfile
+        import updater
+        dest = os.path.join(tempfile.gettempdir(), "SciEdit_NanoPro_Setup_v%s.exe" % version)
+        dlg = self._begin_progress("下载更新 v%s" % version, "正在下载安装包…", 100)
+        self._upd_dl_worker = _UpdateDownloadWorker(url, dest, self)
+
+        def _prog(d, t):
+            if t > 0:
+                if dlg.bar.maximum() != 100:
+                    dlg.bar.setRange(0, 100)
+                dlg.step(int(d * 100 / t), "已下载 %.1f / %.1f MB" % (d / 1048576, t / 1048576))
+            else:
+                dlg.detail_label.setText("已下载 %.1f MB…" % (d / 1048576))
+
+        def _done(err):
+            self._upd_dl_worker = None
+            cancelled = dlg.wasCanceled()
+            self._end_progress(dlg)
+            if cancelled or err == "已取消":
+                self.op_label.setText("更新下载已取消"); return
+            if err:
+                QtWidgets.QMessageBox.warning(self, "下载更新", err); return
+            r = QtWidgets.QMessageBox.question(
+                self, "安装更新", "下载完成。现在关闭程序并运行安装包升级？\n（设置/预设不会丢失）",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+            if r == QtWidgets.QMessageBox.StandardButton.Yes:
+                e2 = updater.run_installer(dest)
+                if e2:
+                    QtWidgets.QMessageBox.warning(self, "安装更新", e2); return
+                QtWidgets.QApplication.quit()  # 退出让安装包覆盖程序文件
+
+        self._upd_dl_worker.progress.connect(_prog)
+        self._upd_dl_worker.done.connect(_done)
+        dlg.canceled.connect(self._upd_dl_worker.cancel)
+        self._upd_dl_worker.start()
 
     def _toggle_wb_panel(self):
         # 开/关 WB 灰度定量浮窗（插件菜单）。懒加载，关闭=隐藏保留状态。
