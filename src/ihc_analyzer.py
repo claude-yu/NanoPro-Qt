@@ -1360,9 +1360,21 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
         self._cells_edited = True
         self._patch_count()               # 人工修正基于缓存质心即时算（不重跑 count_cells）
 
+    def _mark_count_pending(self):
+        """计数参数改变后【即时】把计数相关列(阳性细胞数/总核数/阳性率%)置「…」占位 → 点了就有反应；
+        worker 回来 _fill_table 会用真值覆盖。只刷显示、不触发重算（防抖+后台 worker 性能定式不变）。"""
+        if self.table.rowCount() == 0:
+            return
+        for _name in ("阳性细胞数", "总核数", "阳性率%"):
+            if _name in self.COLS:
+                it = self.table.item(0, self.COLS.index(_name))   # 全图恒为 row 0
+                if it is not None and it.text() not in ("", "—"):
+                    it.setText("…")
+
     def _on_cell_size(self, v):
         self._cell_size = int(v)
         if self._count_on:
+            self._mark_count_pending()     # 即时占位反馈（拖参数当下计数列就变「…」，不等 250ms+worker）
             self._count_timer.start(250)   # 核大小只影响计数粒度→防抖，停手才重算一次（不每 tick 冻结）
             if self._manual_del:    # 减核点存图像坐标，核大小变→匹配半径变，可能不再精确命中
                 self.status.setText("核大小已变，原手动减核点按新检测重新匹配，请复核标记点。")
@@ -1370,12 +1382,14 @@ class IHCAnalyzerPanel(QtWidgets.QWidget):
     def _on_cell_circ(self, v):
         self._cell_circ = float(v)
         if self._count_on:
+            self._mark_count_pending()     # 即时占位反馈
             self._count_timer.start(250)   # 圆度只影响计数→防抖，停手才重算一次
 
     def _on_count_mode(self, *_):
         self._count_mode = self.cb_count_mode.currentData() or "blob"
         if self._count_on:
             self.measure(); self._refresh_display()
+            self._mark_count_pending()     # measure 内 _fill_table 刚填回旧口径值 → 覆盖成「…」占位等 worker 出新口径
             if self._manual_del:    # 切口径→自动核质心整体变，旧减核点可能错配，提示复核（fail-loud）
                 self.status.setText("已切计数口径，原手动减核点按新检测重新匹配，请复核标记点。")
 

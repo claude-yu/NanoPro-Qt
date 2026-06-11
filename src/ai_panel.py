@@ -1213,18 +1213,24 @@ class AiPanel(QtWidgets.QWidget):
                 continue
             if t.btn_stop is not None and not t.btn_stop.isEnabled():
                 continue  # 已点停止(按钮禁用)的行不再被倒计时覆盖，保持"停止中…"(审核 LOW)
-            w = t.worker
-            rem = w.remaining()
-            prog = w.prog
-            if prog >= 0:
-                if t.bar.maximum() == 0:
-                    t.bar.setRange(0, 100)
-                t.bar.setValue(min(100, int(round(prog))))
-            elif t.bar.maximum() != 0:
-                t.bar.setRange(0, 0)       # 服务端未回进度 → busy 滚动
-            t.bar_text.setText("%d/%d·%ds%s" % (
-                min(w.cur_index + 1, t.total), t.total, rem,
-                ("·%d%%" % int(round(prog))) if prog >= 0 else ""))
+            self._refresh_task_progress(t)
+
+    def _refresh_task_progress(self, t: Task):
+        """刷新单行的进度条 + 倒计时文字（tick 周期调 / 「+时间」点击后立即调，让续时即时可见）。"""
+        w = t.worker
+        if w is None or t.bar is None or t.bar_text is None:
+            return
+        rem = w.remaining()
+        prog = w.prog
+        if prog >= 0:
+            if t.bar.maximum() == 0:
+                t.bar.setRange(0, 100)
+            t.bar.setValue(min(100, int(round(prog))))
+        elif t.bar.maximum() != 0:
+            t.bar.setRange(0, 0)       # 服务端未回进度 → busy 滚动
+        t.bar_text.setText("%d/%d·%ds%s" % (
+            min(w.cur_index + 1, t.total), t.total, rem,
+            ("·%d%%" % int(round(prog))) if prog >= 0 else ""))
 
     def _on_image(self, b64: str, idx: int, t: Task):
         """该任务某张生成完成 → 主线程落地（多任务并发但落地都在主线程串行，安全）。"""
@@ -1268,7 +1274,10 @@ class AiPanel(QtWidgets.QWidget):
     def _extend(self, t: Task):
         if t.state == "running" and t.worker:
             t.worker.extend(60.0)
-            self._set_status("任务 #%d 已 +60s 续时" % t.id)
+            self._refresh_task_progress(t)   # 立即把 +60 反映到倒计时（不等下一次 250ms tick）→ 点了就有反应
+            self._set_status("任务 #%d 已 +60s 续时（当前剩约 %ds）" % (t.id, t.worker.remaining()))
+        else:
+            self._set_status("任务 #%d 当前不可续时（未在生成中）" % t.id)  # 非运行态也给反馈，不静默
 
     def _remove(self, t: Task):
         """移除某任务行：running 先 stop（标记 removed，worker 自然结束后 _on_done 据 removed 跳过 UI），从表删行。"""

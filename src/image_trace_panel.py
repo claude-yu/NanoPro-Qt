@@ -501,6 +501,9 @@ class ImageTracePanel(QtWidgets.QWidget):
             return
         if self._busy:  # 合并：full 优先于 preview
             self._pending = "full" if (kind == "full" or self._pending == "full") else "preview"
+            if self._pending == "full":  # 排队全分辨率应用 → 即时反馈 + 禁用防重复点（_on_done/_failed 收尾会恢复）
+                self.status.setText("已排队全分辨率应用，等当前预览完成…")
+                self.btn_apply.setEnabled(False)
             return
         self._start(self._params(kind == "full"), kind == "full")
 
