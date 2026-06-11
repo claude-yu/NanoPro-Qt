@@ -14,7 +14,7 @@ DEFAULT_BASE = "https://grsaiapi.com"
 
 
 # 应用版本（与 NanoPro_Setup.iss MyAppVersion 同步；自动更新据此比对 GitHub Releases）。发版时一起改。
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.18.2"
 
 
 def _app_dir() -> Path:
